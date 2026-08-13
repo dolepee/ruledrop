@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: ruledrop
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: 4179
+      - key: ALLOWED_ORIGIN
+        value: https://ruledrop.dolepee.com
+      - key: RULEDROP_POOL_ADDRESS
+        value: 0x6f8dE7e1599A0c8D38eB25996cB841a4920ed999
+      - key: CREDITCOIN_RPC
+        value: https://rpc.cc3-testnet.creditcoin.network
+      - key: ATTESTCOIN_PROOF_BUILDER
+        value: https://prover.cc3-testnet.creditcoin.network
+      - key: ETHEREUM_RPC_URLS
+        sync: false

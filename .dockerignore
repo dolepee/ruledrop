@@ -1,0 +1,10 @@
+.git
+.env
+cache
+dist
+lib
+node_modules
+out
+contracts/test
+test
+*.log

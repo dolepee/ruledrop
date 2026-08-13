@@ -5,7 +5,10 @@
   "main": "index.js",
   "scripts": {
     "test": "forge test && node --test",
-    "build": "forge build",
+    "build": "forge build && vite build",
+    "build:contracts": "forge build",
+    "build:web": "vite build",
+    "app:dev": "vite",
     "verify:mainnet-gate": "node scripts/verify-mainnet-gate.mjs",
     "worker": "node src/server.mjs"
   },
@@ -18,6 +21,14 @@
     "@gluwa/usc-sdk": "^0.18.0",
     "@openzeppelin/contracts": "^5.4.0",
     "dotenv": "^17.4.2",
-    "ethers": "^6.17.0"
+    "ethers": "^6.17.0",
+    "lucide-react": "^1.31.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.5",
+    "playwright-core": "^1.62.1",
+    "vite": "^8.2.1"
   }
 }

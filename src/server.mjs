@@ -1,7 +1,9 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
+import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RuleDropWorker, WorkerError, createEthereumProviders } from "./proof-worker.mjs";
+import { poolAbi } from "./pool-abi.mjs";
 
 const POOL_ADDRESS = process.env.RULEDROP_POOL_ADDRESS ?? "0x6f8dE7e1599A0c8D38eB25996cB841a4920ed999";
 const CREDITCOIN_RPC = process.env.CREDITCOIN_RPC ?? "https://rpc.cc3-testnet.creditcoin.network";
@@ -10,12 +12,11 @@ const PORT = Number(process.env.PORT ?? 4179);
 const HOST = process.env.HOST ?? "127.0.0.1";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
 const ethereumRpcUrls = (process.env.ETHEREUM_RPC_URLS ?? "").split(",").map((value) => value.trim());
-const artifactPath = fileURLToPath(new URL("../out/RuleDropPool.sol/RuleDropPool.json", import.meta.url));
-const artifact = JSON.parse(await readFile(artifactPath, "utf8"));
+const staticRoot = fileURLToPath(new URL("../dist", import.meta.url));
 
 const worker = new RuleDropWorker({
   poolAddress: POOL_ADDRESS,
-  poolAbi: artifact.abi,
+  poolAbi,
   creditcoinRpc: CREDITCOIN_RPC,
   proofBuilderUrl: PROOF_BUILDER_URL,
   ethereumProviders: createEthereumProviders(ethereumRpcUrls),
@@ -49,6 +50,11 @@ createServer(async (request, response) => {
       const body = await readJson(request);
       const prepared = await worker.prepareClaim({ campaignId: claimMatch[1], ...body });
       sendJson(response, 200, prepared);
+      return;
+    }
+
+    if (request.method === "GET") {
+      await sendStatic(response, url.pathname);
       return;
     }
 
@@ -89,4 +95,26 @@ async function readJson(request) {
 function sendJson(response, status, body) {
   response.writeHead(status);
   response.end(JSON.stringify(body));
+}
+
+async function sendStatic(response, pathname) {
+  const requested = pathname === "/" ? "index.html" : normalize(pathname).replace(/^[/\\]+/, "");
+  if (requested.startsWith("..")) throw new WorkerError("NOT_FOUND", "Route not found", 404);
+  let body;
+  let file = join(staticRoot, requested);
+  try {
+    body = await readFile(file);
+  } catch {
+    file = join(staticRoot, "index.html");
+    body = await readFile(file);
+  }
+  response.setHeader("content-type", mimeType(extname(file)));
+  response.setHeader("cache-control", file.endsWith("index.html") ? "no-cache" : "public, max-age=31536000, immutable");
+  response.writeHead(200);
+  response.end(body);
+}
+
+function mimeType(extension) {
+  return ({ ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".css": "text/css; charset=utf-8", ".svg": "image/svg+xml" })[extension]
+    ?? "application/octet-stream";
 }
