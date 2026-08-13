@@ -65,7 +65,9 @@ contract RuleDropPool is Ownable, Pausable, ReentrancyGuard {
     error CampaignNotFinalized();
     error CampaignNotFound();
     error ClaimantMismatch();
+    error ContractClaimantUnsupported();
     error InvalidCampaign();
+    error InvalidSourceChain();
     error NotRegistered();
     error RegistrationClosed();
     error RegistrationOpen();
@@ -79,6 +81,11 @@ contract RuleDropPool is Ownable, Pausable, ReentrancyGuard {
         if (address(verifier_) == address(0)) revert InvalidCampaign();
         claimVerifier = verifier_;
         chainInfo = IChainInfo(chainInfoOverride == address(0) ? CHAIN_INFO : chainInfoOverride);
+        IChainInfo.ChainInfoResult memory source = chainInfo.get_chain_by_key(ETHEREUM_MAINNET_CHAIN_KEY);
+        if (
+            !source.exists || source.info.chainKey != ETHEREUM_MAINNET_CHAIN_KEY || source.info.chainId != 1
+                || source.info.chainEncoding != 1
+        ) revert InvalidSourceChain();
     }
 
     function createCampaign(
@@ -132,6 +139,7 @@ contract RuleDropPool is Ownable, Pausable, ReentrancyGuard {
 
     function registerClaim(uint256 campaignId, AttestcoinClaimVerifier.Proof calldata proof) external {
         Campaign storage campaign = _campaign(campaignId);
+        if (msg.sender.code.length != 0) revert ContractClaimantUnsupported();
         if (block.timestamp > campaign.registrationDeadline) revert RegistrationClosed();
         if (campaign.finalized) revert AlreadyFinalized();
 

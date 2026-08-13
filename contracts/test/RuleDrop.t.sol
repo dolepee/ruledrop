@@ -151,6 +151,22 @@ contract RuleDropTest is Test {
         );
     }
 
+    function testDeploymentRejectsWrongSourceChainMapping() external {
+        MockChainInfo badChainInfo = new MockChainInfo(25_747_630);
+        badChainInfo.setSource(3, 11155111, 1, true);
+        vm.expectRevert(RuleDropPool.InvalidSourceChain.selector);
+        new RuleDropPool(claimVerifier, address(this), address(badChainInfo));
+    }
+
+    function testContractWalletCannotRegisterInV1() external {
+        uint256 campaignId = _createCampaign(1 ether);
+        ContractClaimant claimant = new ContractClaimant();
+        vm.expectRevert(RuleDropPool.ContractClaimantUnsupported.selector);
+        claimant.register(
+            pool, campaignId, _proof(_encodedTransfer(address(claimant), RECIPIENT, 150e6, 1), SOURCE_BLOCK)
+        );
+    }
+
     function testPauseOnlyBlocksNewCampaigns() external {
         uint256 campaignId = _createCampaign(1 ether);
         pool.pauseNewCampaigns();
@@ -255,5 +271,11 @@ contract RuleDropTest is Test {
         chunks[1] = typeSpecific;
         chunks[2] = receipt;
         return abi.encode(uint8(2), chunks);
+    }
+}
+
+contract ContractClaimant {
+    function register(RuleDropPool pool, uint256 campaignId, AttestcoinClaimVerifier.Proof calldata proof) external {
+        pool.registerClaim(campaignId, proof);
     }
 }
