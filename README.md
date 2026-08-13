@@ -23,6 +23,8 @@ On August 13, 2026, Creditcoin testnet chain `102031` reported:
 
 The source transaction predates RuleDrop and directly transferred canonical Ethereum USDC from the claimant wallet.
 
+The RuleDrop contracts and a fully funded `10 tCTC` campaign are also live on Creditcoin testnet. See [deployment evidence](docs/DEPLOYMENTS.md) for contract addresses, transaction hashes, and the exact campaign rule.
+
 ## Contracts
 
 - `RuleDropPool`: fully funded immutable campaigns, registration, permissionless finalization, and pull withdrawals.
@@ -34,9 +36,9 @@ The source transaction predates RuleDrop and directly transferred canonical Ethe
 ```bash
 npm install
 forge test
+npm run verify:mainnet-gate
 ```
 
 ## Claim boundaries
 
 RuleDrop proves qualifying wallets, not unique humans. The hackathon deployment is testnet-only, unaudited, and does not claim general Sybil resistance.
-
