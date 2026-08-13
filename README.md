@@ -32,11 +32,16 @@ The RuleDrop contracts and a fully funded `10 tCTC` campaign are also live on Cr
 - `AttestcoinClaimVerifier`: native proof verification and source transaction replay identity.
 - `USDCTransferPredicateV1`: exact direct-USDC transfer semantics.
 
+## Application worker
+
+The Node worker reads live campaign state, uses fallback Ethereum RPCs for early validation, retries and caches Attestcoin proofs, and returns claim calldata only after the exact onchain call simulates successfully. See [the worker API](docs/WORKER_API.md).
+
 ## Local verification
 
 ```bash
 npm install
 forge test
+npm test
 npm run verify:mainnet-gate
 ```
 
