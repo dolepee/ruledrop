@@ -20,8 +20,9 @@ On August 13, 2026, Creditcoin testnet chain `102031` reported:
 - Latest attested Ethereum block `25,747,630`
 - A valid proof for historical mainnet transaction `0x7e6c853f85d4db4040206d7d49e1327b009894f7f0b8cba7c5c1fab640bd1227`
 - Native `0x0FD2` verification succeeded in `896 ms`
+- The same proof registered its historical sender in live campaign `1` through Creditcoin transaction `0x6470d1850b4444a0627cc997bacc982af8757bb2682bf272422e0100f871de5e`
 
-The source transaction predates RuleDrop and directly transferred canonical Ethereum USDC from the claimant wallet.
+The source transaction predates RuleDrop and directly transferred canonical Ethereum USDC from the claimant wallet. Its live Creditcoin receipt contains both the native verifier event and RuleDrop's `ClaimRegistered` event.
 
 The RuleDrop contracts and a fully funded `10 tCTC` campaign are also live on Creditcoin testnet. See [deployment evidence](docs/DEPLOYMENTS.md) for contract addresses, transaction hashes, and the exact campaign rule.
 

@@ -20,6 +20,13 @@ Network:
 
 Each address has nonempty deployed bytecode. The verifier is configured with Creditcoin's native query verifier at `0x0000000000000000000000000000000000000FD2`; the pool reads source-chain state through `0x0000000000000000000000000000000000000FD3`.
 
+All four deployments, including the linked decoder library, are source-verified on Blockscout:
+
+- [`EvmV1Decoder`](https://creditcoin-testnet.blockscout.com/address/0x8182E6D90F53Fdc261510A949915842a09dFC42a)
+- [`USDCTransferPredicateV1`](https://creditcoin-testnet.blockscout.com/address/0x094Ba0AA23e19E117DdFdB17327cD5626354B380)
+- [`AttestcoinClaimVerifier`](https://creditcoin-testnet.blockscout.com/address/0x0B2b11a186f0CeF058f6A4A1352406477AB7627c)
+- [`RuleDropPool`](https://creditcoin-testnet.blockscout.com/address/0x6f8dE7e1599A0c8D38eB25996cB841a4920ed999)
+
 ## Live Campaign 1
 
 - Creation transaction: `0x3aa269dae1435c6dd737a139269d87d946d8b496f8bbd81f041c256573eed640`
@@ -41,4 +48,22 @@ Historical source transaction:
 - Amount: `1,000 USDC`
 - The transaction predates the RuleDrop campaign.
 
-The campaign is intentionally narrow and exists to prove the complete mainnet-history claim path. Claim registration evidence will be appended after the historical sender submits the live proof.
+The campaign is intentionally narrow and exists to prove the complete mainnet-history claim path.
+
+## Live Claim Evidence
+
+- Claim transaction: [`0x6470…de5e`](https://creditcoin-testnet.blockscout.com/tx/0x6470d1850b4444a0627cc997bacc982af8757bb2682bf272422e0100f871de5e)
+- Transaction status: success
+- Creditcoin block: `5,303,947`
+- Gas used: `497,406`
+- Registered claimant: `0xbad35FA6e368e90fC4faf63507F2D0A2Fdf94BAF`
+- Campaign claimant count after execution: `1`
+- Campaign-scoped query ID: `0x27ecd39d78609f3e03454b05300017ab8b390729bf905047af574d1a08f11437`
+- Verified source amount: `1,000 USDC`
+
+The receipt contains two relevant logs in one state transition:
+
+1. The native verifier at `0x0000000000000000000000000000000000000FD2` emitted successful verification for chain key `3`, source block `25,049,872`, transaction index `142`.
+2. `RuleDropPool` emitted `ClaimRegistered` for campaign `1`, the historical sender, the campaign-scoped query ID, source block, and amount.
+
+Post-transaction reads confirmed `registered(1, claimant) == true` and `claimantCount == 1`.

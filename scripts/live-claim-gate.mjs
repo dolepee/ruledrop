@@ -1,12 +1,17 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { proofProvider } from "@gluwa/usc-sdk";
+import { Contract, Interface, JsonRpcProvider } from "ethers";
 
 const PORT = Number(process.env.PORT ?? 4178);
 const POOL = "0x6f8dE7e1599A0c8D38eB25996cB841a4920ed999";
 const CLAIMANT = "0xbad35FA6e368e90fC4faf63507F2D0A2Fdf94BAF";
 const SOURCE_TX = "0x7e6c853f85d4db4040206d7d49e1327b009894f7f0b8cba7c5c1fab640bd1227";
+const RPC_URL = "https://rpc.cc3-testnet.creditcoin.network";
 const artifact = JSON.parse(await readFile(new URL("../out/RuleDropPool.sol/RuleDropPool.json", import.meta.url)));
+const provider = new JsonRpcProvider(RPC_URL, 102031, { staticNetwork: true });
+const contract = new Contract(POOL, artifact.abi, provider);
+const contractInterface = new Interface(artifact.abi);
 
 let proofCache;
 async function claimData() {
@@ -35,6 +40,22 @@ async function claimData() {
     };
   }
   return proofCache;
+}
+
+async function preparedClaim() {
+  const data = await claimData();
+  await contract.registerClaim.staticCall(data.campaignId, data.proof, {
+    from: CLAIMANT,
+    gasLimit: 5_000_000n,
+  });
+  const transaction = {
+    from: CLAIMANT,
+    to: POOL,
+    data: contractInterface.encodeFunctionData("registerClaim", [data.campaignId, data.proof]),
+    gas: "0x989680",
+    value: "0x0",
+  };
+  return { ...data, transaction };
 }
 
 const page = `<!doctype html>
@@ -68,40 +89,47 @@ const page = `<!doctype html>
   <div id="status">Ready.</div>
 </main>
 <script type="module">
-  import { BrowserProvider, Contract, getAddress } from "https://cdn.jsdelivr.net/npm/ethers@6.17.0/+esm";
+  import { getAddress } from "https://cdn.jsdelivr.net/npm/ethers@6.17.0/+esm";
   const button = document.querySelector('#claim');
   const status = document.querySelector('#status');
   const write = (message) => status.textContent = message;
   button.addEventListener('click', async () => {
     button.disabled = true;
+    let phase = 'wallet connection';
     try {
       if (!window.ethereum) throw new Error('No injected wallet found');
       write('Connecting wallet...');
-      const provider = new BrowserProvider(window.ethereum);
-      await provider.send('eth_requestAccounts', []);
-      const signer = await provider.getSigner();
-      const address = await signer.getAddress();
+      const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+      const address = accounts[0];
       if (getAddress(address) !== getAddress('${CLAIMANT}')) throw new Error('Connect the historical source wallet ${CLAIMANT}');
+      phase = 'network switch';
       try {
-        await provider.send('wallet_switchEthereumChain', [{ chainId: '0x18e8f' }]);
+        await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x18e8f' }] });
       } catch (error) {
-        if (error.code !== 4902) throw error;
-        await provider.send('wallet_addEthereumChain', [{
+        const unknownChain = error.code === 4902 || /unrecognized chain|unknown chain/i.test(error.message ?? '');
+        if (!unknownChain) throw error;
+        phase = 'network addition';
+        await window.ethereum.request({ method: 'wallet_addEthereumChain', params: [{
           chainId: '0x18e8f', chainName: 'Creditcoin Testnet', nativeCurrency: { name:'Test CTC', symbol:'tCTC', decimals:18 },
           rpcUrls:['https://rpc.cc3-testnet.creditcoin.network'], blockExplorerUrls:['https://creditcoin-testnet.blockscout.com']
-        }]);
+        }] });
+        phase = 'network switch after addition';
+        await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{ chainId: '0x18e8f' }] });
       }
-      write('Fetching and simulating the Attestcoin proof...');
-      const data = await fetch('/claim-data').then((response) => response.json());
-      const contract = new Contract(data.pool, ${JSON.stringify(artifact.abi)}, signer);
-      await contract.registerClaim.staticCall(data.campaignId, data.proof);
+      phase = 'server-side proof simulation';
+      write('Building and simulating the Attestcoin proof...');
+      const data = await fetch('/prepare-claim').then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error ?? 'Claim preparation failed');
+        return body;
+      });
       write('Simulation passed. Confirm the registration in your wallet.');
-      const tx = await contract.registerClaim(data.campaignId, data.proof, { gasLimit: 5000000n });
-      write('Submitted ' + tx.hash + '. Waiting for confirmation...');
-      const receipt = await tx.wait();
-      write('Claim registered in Creditcoin block ' + receipt.blockNumber + '. Tx: ' + tx.hash);
+      phase = 'wallet transaction submission';
+      const hash = await window.ethereum.request({ method: 'eth_sendTransaction', params: [data.transaction] });
+      write('Submitted ' + hash + '. The onchain verifier will confirm registration.');
     } catch (error) {
-      write('Stopped: ' + (error.shortMessage ?? error.message ?? String(error)));
+      const detail = error.shortMessage ?? error.message ?? error.data?.message ?? String(error);
+      write('Stopped during ' + phase + ': ' + detail + (error.code ? ' [' + error.code + ']' : ''));
       button.disabled = false;
     }
   });
@@ -114,6 +142,11 @@ createServer(async (request, response) => {
       response.end(JSON.stringify(await claimData()));
       return;
     }
+    if (request.url === "/prepare-claim") {
+      response.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+      response.end(JSON.stringify(await preparedClaim()));
+      return;
+    }
     response.writeHead(200, { "content-type": "text/html; charset=utf-8" });
     response.end(page);
   } catch (error) {
@@ -123,4 +156,3 @@ createServer(async (request, response) => {
 }).listen(PORT, "127.0.0.1", () => {
   console.log(`RuleDrop live claim gate: http://127.0.0.1:${PORT}`);
 });
-
