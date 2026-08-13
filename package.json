@@ -1,0 +1,22 @@
+{
+  "name": "ruledrop",
+  "version": "1.0.0",
+  "description": "Claimant-proven historical rewards on Creditcoin using Attestcoin",
+  "main": "index.js",
+  "scripts": {
+    "test": "forge test",
+    "build": "forge build",
+    "verify:mainnet-gate": "node scripts/verify-mainnet-gate.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@gluwa/usc-contracts": "^0.1.2",
+    "@gluwa/usc-sdk": "^0.18.0",
+    "@openzeppelin/contracts": "^5.4.0",
+    "dotenv": "^17.4.2",
+    "ethers": "^6.17.0"
+  }
+}
