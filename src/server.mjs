@@ -53,8 +53,8 @@ createServer(async (request, response) => {
       return;
     }
 
-    if (request.method === "GET") {
-      await sendStatic(response, url.pathname);
+    if (request.method === "GET" || request.method === "HEAD") {
+      await sendStatic(response, url.pathname, request.method === "HEAD");
       return;
     }
 
@@ -97,7 +97,7 @@ function sendJson(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
-async function sendStatic(response, pathname) {
+async function sendStatic(response, pathname, headOnly = false) {
   const requested = pathname === "/" ? "index.html" : normalize(pathname).replace(/^[/\\]+/, "");
   if (requested.startsWith("..")) throw new WorkerError("NOT_FOUND", "Route not found", 404);
   let body;
@@ -111,7 +111,7 @@ async function sendStatic(response, pathname) {
   response.setHeader("content-type", mimeType(extname(file)));
   response.setHeader("cache-control", file.endsWith("index.html") ? "no-cache" : "public, max-age=31536000, immutable");
   response.writeHead(200);
-  response.end(body);
+  response.end(headOnly ? undefined : body);
 }
 
 function mimeType(extension) {
