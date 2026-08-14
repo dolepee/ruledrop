@@ -52,6 +52,21 @@ Historical source transaction:
 
 The campaign is intentionally narrow and exists to prove the complete mainnet-history claim path.
 
+## Live Campaign 2
+
+Campaign `2` preserves the same proven historical rule while keeping the public application usable beyond the submission and judging window.
+
+- Creation transaction: [`0xc88b…6cece`](https://creditcoin-testnet.blockscout.com/tx/0xc88ba5145ae76b57b0504097cac1d810bfc13f9ec3b7c195a6f0ec35c156cece)
+- Transaction status: success
+- Sponsor: `0x813C4BF413BeeA09a7f61450Bd9a9Fa321ED25Db`
+- Funded pool: `10 tCTC`
+- Required action: the same direct successful Ethereum mainnet USDC transfer used by campaign `1`
+- Registration deadline: October 15, 2026 at 23:59:59 UTC (`1792108799`)
+- Withdrawal deadline: October 31, 2026 at 23:59:59 UTC (`1793491199`)
+- Initial claimant count: `0`
+
+The application resolves `campaignCount()` and presents the latest campaign, so campaign `1` remains immutable evidence while campaign `2` is the active judge-facing state.
+
 ## Live Claim Evidence
 
 - Claim transaction: [`0x6470…de5e`](https://creditcoin-testnet.blockscout.com/tx/0x6470d1850b4444a0627cc997bacc982af8757bb2682bf272422e0100f871de5e)

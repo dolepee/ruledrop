@@ -35,7 +35,7 @@ On August 13, 2026, Creditcoin testnet chain `102031` reported:
 
 The source transaction predates RuleDrop and directly transferred canonical Ethereum USDC from the claimant wallet. Its live Creditcoin receipt contains both the native verifier event and RuleDrop's `ClaimRegistered` event.
 
-The RuleDrop contracts and a fully funded `10 tCTC` campaign are also live on Creditcoin testnet. See [deployment evidence](docs/DEPLOYMENTS.md) for contract addresses, transaction hashes, and the exact campaign rule.
+The RuleDrop contracts and two fully funded `10 tCTC` campaigns are live on Creditcoin testnet. Campaign `1` preserves the completed proof evidence; campaign `2` keeps the public claim surface open through October 2026. See [deployment evidence](docs/DEPLOYMENTS.md) for contract addresses, transaction hashes, and the exact campaign rule.
 
 ## Contracts
 
