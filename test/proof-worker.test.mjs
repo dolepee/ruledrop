@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { ExpiringCache, RuleDropWorker, WorkerError, serializeCampaign, validateTransactionHash } from "../src/proof-worker.mjs";
+import { poolAbiV2 } from "../src/pool-abi.mjs";
 
 const POOL = "0x6f8dE7e1599A0c8D38eB25996cB841a4920ed999";
 const CLAIMANT = "0xbad35FA6e368e90fC4faf63507F2D0A2Fdf94BAF";
@@ -102,6 +103,35 @@ test("prepareClaim exposes deterministic simulation rejection", async () => {
   );
 });
 
+test("prepareClaim routes an interaction campaign through its dedicated registration function", async () => {
+  const poolContract = interactionPoolFixture();
+  const worker = makeWorker({
+    poolAbi: poolAbiV2,
+    poolContract,
+    proofBuilder: { async getProof() { return { success: true, data: proofFixture() }; } },
+  });
+
+  const result = await worker.prepareClaim({ campaignId: 2, transactionHash: TX_HASH, claimant: CLAIMANT });
+  assert.equal(result.campaign.claimTemplateName, "contract-interaction");
+  assert.equal(result.campaign.interactionRule.selector, "0x12345678");
+  assert.equal(poolContract.interactionSimulationCalls, 1);
+  assert.match(result.transaction.data, /^0x/);
+});
+
+test("latest campaign follows the onchain campaign counter", async () => {
+  const poolContract = poolFixture();
+  poolContract.campaignCount = async () => 2n;
+  let requestedId;
+  poolContract.getCampaign = async (campaignId) => {
+    requestedId = campaignId;
+    return campaignFixture();
+  };
+  const worker = makeWorker({ poolContract });
+  const campaign = await worker.getLatestCampaign();
+  assert.equal(requestedId, 2);
+  assert.equal(campaign.id, 2);
+});
+
 function makeWorker(overrides = {}) {
   return new RuleDropWorker({
     poolAddress: POOL,
@@ -122,6 +152,39 @@ function poolFixture() {
     async withdrawn() { return false; },
     registerClaim: {
       staticCall: async () => { fixture.simulationCalls += 1; },
+    },
+  };
+  return fixture;
+}
+
+function interactionPoolFixture() {
+  const fixture = {
+    interactionSimulationCalls: 0,
+    async getCampaign() {
+      return {
+        ...campaignFixture(),
+        maximumWeight: 0n,
+        totalWeight: 0n,
+        totalPaid: 0n,
+        claimTemplate: 1n,
+        payoutPolicy: 0n,
+      };
+    },
+    async getInteractionRule() {
+      return {
+        target: "0x1111111111111111111111111111111111111111",
+        selector: "0x12345678",
+        requiredEventEmitter: "0x1111111111111111111111111111111111111111",
+        requiredEventSignature: `0x${"33".repeat(32)}`,
+        claimantTopicIndex: 1n,
+        startBlock: 25_049_872n,
+        endBlock: 25_049_872n,
+      };
+    },
+    async registered() { return false; },
+    async withdrawn() { return false; },
+    registerInteractionClaim: {
+      staticCall: async () => { fixture.interactionSimulationCalls += 1; },
     },
   };
   return fixture;

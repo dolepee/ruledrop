@@ -1,0 +1,17 @@
+name: Keep public pilot warm
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  healthcheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Check RuleDrop health
+        run: curl --fail --silent --show-error --retry 3 --max-time 25 https://ruledrop.dolepee.com/health

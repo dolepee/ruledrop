@@ -1,7 +1,7 @@
 {
   "name": "ruledrop",
   "version": "1.0.0",
-  "description": "Claimant-proven historical rewards on Creditcoin using Attestcoin",
+  "description": "Open cross-chain claims settlement on Creditcoin using Attestcoin",
   "main": "index.js",
   "scripts": {
     "test": "forge test && node --test",
@@ -9,6 +9,7 @@
     "build:contracts": "forge build",
     "build:web": "vite build",
     "app:dev": "vite",
+    "cohort:discover": "node scripts/discover-direct-usdc-cohort.mjs",
     "verify:mainnet-gate": "node scripts/verify-mainnet-gate.mjs",
     "worker": "node src/server.mjs"
   },

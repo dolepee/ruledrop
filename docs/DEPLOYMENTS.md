@@ -1,5 +1,7 @@
 # Creditcoin Testnet Deployment
 
+> This page records the live V1 deployment. The repository also contains an expanded V2 claims implementation; V2 is not live and none of its capabilities are claimed as deployed evidence yet.
+
 Deployment date: August 13, 2026
 
 Network:

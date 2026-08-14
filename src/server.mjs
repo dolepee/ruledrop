@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RuleDropWorker, WorkerError, createEthereumProviders } from "./proof-worker.mjs";
-import { poolAbi } from "./pool-abi.mjs";
+import { selectPoolAbi } from "./pool-abi.mjs";
 
 const POOL_ADDRESS = process.env.RULEDROP_POOL_ADDRESS ?? "0x6f8dE7e1599A0c8D38eB25996cB841a4920ed999";
 const CREDITCOIN_RPC = process.env.CREDITCOIN_RPC ?? "https://rpc.cc3-testnet.creditcoin.network";
@@ -11,12 +11,13 @@ const PROOF_BUILDER_URL = process.env.ATTESTCOIN_PROOF_BUILDER ?? "https://prove
 const PORT = Number(process.env.PORT ?? 4179);
 const HOST = process.env.HOST ?? "127.0.0.1";
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN ?? "http://localhost:3000";
+const POOL_VERSION = process.env.RULEDROP_POOL_VERSION ?? "1";
 const ethereumRpcUrls = (process.env.ETHEREUM_RPC_URLS ?? "").split(",").map((value) => value.trim());
 const staticRoot = fileURLToPath(new URL("../dist", import.meta.url));
 
 const worker = new RuleDropWorker({
   poolAddress: POOL_ADDRESS,
-  poolAbi,
+  poolAbi: selectPoolAbi(POOL_VERSION),
   creditcoinRpc: CREDITCOIN_RPC,
   proofBuilderUrl: PROOF_BUILDER_URL,
   ethereumProviders: createEthereumProviders(ethereumRpcUrls),
@@ -39,6 +40,11 @@ createServer(async (request, response) => {
     }
 
     const campaignMatch = url.pathname.match(/^\/api\/campaigns\/(\d+)$/);
+    if (request.method === "GET" && url.pathname === "/api/campaigns/latest") {
+      const campaign = await worker.getLatestCampaign(url.searchParams.get("claimant"));
+      sendJson(response, 200, campaign);
+      return;
+    }
     if (request.method === "GET" && campaignMatch) {
       const campaign = await worker.getCampaign(campaignMatch[1], url.searchParams.get("claimant"));
       sendJson(response, 200, campaign);

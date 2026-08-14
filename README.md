@@ -4,9 +4,18 @@
 
 Live application: [ruledrop.dolepee.com](https://ruledrop.dolepee.com)
 
-RuleDrop turns verified Ethereum mainnet history into permissionless rewards on Creditcoin. A sponsor fully funds an immutable rule; any wallet that proves the exact historical action through Attestcoin can register and withdraw its equal pro-rata share after registration closes.
+RuleDrop turns verified Ethereum mainnet history into open, funded claims on Creditcoin. A protocol, DAO, or merchant funds an immutable obligation; any wallet that proves the exact historical action through Attestcoin can establish its own inclusion and withdraw after finalization.
 
-The MVP supports one deliberately narrow predicate: a direct, successful Ethereum mainnet USDC `transfer(address,uint256)` to an exact recipient, above an exact amount, inside an immutable historical block range.
+The current live V1 deployment supports one deliberately narrow predicate: a direct, successful Ethereum mainnet USDC `transfer(address,uint256)` to an exact recipient, above an exact amount, inside an immutable historical block range.
+
+The repository's V2 implementation expands the same engine for compensation, rebates, and recovery grants with:
+
+- Reviewed direct-transfer and contract-interaction claim templates.
+- Exact target, selector, event emitter, event signature, and claimant-topic binding.
+- Equal and capped source-amount-weighted pro-rata settlement.
+- A version-aware worker that preserves the live V1 path until V2 is separately deployed and verified.
+
+V2 source code is not presented as live deployment evidence. See [product direction](docs/PRODUCT_DIRECTION_2026-08-14.md) and [deployment evidence](docs/DEPLOYMENTS.md).
 
 ## Why Attestcoin is load-bearing
 
@@ -30,9 +39,10 @@ The RuleDrop contracts and a fully funded `10 tCTC` campaign are also live on Cr
 
 ## Contracts
 
-- `RuleDropPool`: fully funded immutable campaigns, registration, permissionless finalization, and pull withdrawals.
+- `RuleDropPool`: fully funded immutable claims, versioned templates, pro-rata settlement policies, permissionless finalization, and pull withdrawals.
 - `AttestcoinClaimVerifier`: native proof verification and source transaction replay identity.
 - `USDCTransferPredicateV1`: exact direct-USDC transfer semantics.
+- `ContractInteractionPredicateV1`: exact direct contract call and claimant-bound event semantics.
 
 ## Application worker
 

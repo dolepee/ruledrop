@@ -41,7 +41,7 @@ function App() {
     setLoading(true);
     try {
       const query = wallet ? `?claimant=${wallet}` : "";
-      const response = await fetch(`/api/campaigns/1${query}`);
+      const response = await fetch(`/api/campaigns/latest${query}`);
       const data = await response.json();
       if (!response.ok) throw new Error(data.error?.message ?? "Campaign unavailable");
       setCampaign(data);
@@ -69,12 +69,12 @@ function App() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <button className="brand" onClick={() => setView("campaign")} aria-label="Open RuleDrop campaign">
+        <button className="brand" onClick={() => setView("campaign")} aria-label="Open RuleDrop claim">
           <span className="brand-mark">R</span><span>RuleDrop</span>
         </button>
         <nav aria-label="Primary navigation">
-          <button className={view === "campaign" ? "active" : ""} onClick={() => setView("campaign")}>Campaign</button>
-          <button className={view === "sponsor" ? "active" : ""} onClick={() => setView("sponsor")}>For sponsors</button>
+          <button className={view === "campaign" ? "active" : ""} onClick={() => setView("campaign")}>Live claim</button>
+          <button className={view === "sponsor" ? "active" : ""} onClick={() => setView("sponsor")}>Create claim</button>
           <button className={view === "proof" ? "active" : ""} onClick={() => setView("proof")}>Verification</button>
         </nav>
         <button className="wallet-button" onClick={connect}>
@@ -89,7 +89,7 @@ function App() {
         {view === "proof" && <ProofView />}
       </main>
       <footer>
-        <span>RuleDrop testnet pilot</span>
+        <span>RuleDrop cross-chain claims pilot</span>
         <span>Creditcoin 3 Testnet · Chain 102031</span>
         <a href="https://github.com/dolepee/ruledrop" target="_blank" rel="noreferrer">Source <ExternalLink size={13} aria-hidden="true" /></a>
       </footer>
@@ -104,12 +104,12 @@ function CampaignView({ campaign, loading, account, connect, reload, notify }) {
     <>
       <section className="campaign-head">
         <div>
-          <div className="eyebrow"><span className="live-dot" /> LIVE CAMPAIGN · #1</div>
-          <h1>Ethereum USDC supporters</h1>
-          <p>Prove the historical transfer yourself. No sponsor-authored wallet list decides who qualifies.</p>
+          <div className="eyebrow"><span className="live-dot" /> FUNDED CLAIM · PAYMENT REBATE #{campaign.id}</div>
+          <h1>Claim from a payment you already made.</h1>
+          <p>Bring the qualifying Ethereum receipt yourself. The published rule—not a private eligibility list—decides who can collect.</p>
         </div>
         <div className="pool-total">
-          <span>Funded reward pool</span>
+          <span>Funded claim reserve</span>
           <strong>{campaign.fundedPoolTctc} <small>tCTC</small></strong>
           <span className="locked"><LockKeyhole size={14} aria-hidden="true" /> Locked at creation</span>
         </div>
@@ -118,14 +118,14 @@ function CampaignView({ campaign, loading, account, connect, reload, notify }) {
       <section className="campaign-grid">
         <div className="rule-panel">
           <div className="section-title">
-            <div><span>IMMUTABLE RULE</span><h2>One source action. Exact checks.</h2></div>
+            <div><span>IMMUTABLE ENTITLEMENT</span><h2>One source event. One funded right.</h2></div>
             <a className="icon-link" href={`${EXPLORER}/address/${POOL}`} target="_blank" rel="noreferrer" aria-label="View RuleDrop pool contract"><ExternalLink size={18} /></a>
           </div>
           <div className="rule-sentence">Sent at least <strong>{campaign.minimumAmountUsdc} USDC</strong> directly to the campaign recipient in Ethereum block <strong>{campaign.startBlock.toLocaleString()}</strong>.</div>
           <div className="route-map" aria-label="Ethereum proof verified and registered on Creditcoin">
-            <div className="chain-node ethereum"><span>01</span><strong>Ethereum</strong><small>Historical action</small></div>
+            <div className="chain-node ethereum"><span>01</span><strong>Ethereum</strong><small>Payment receipt</small></div>
             <div className="route-line"><span>Attestcoin proof</span><ArrowUpRight aria-hidden="true" /></div>
-            <div className="chain-node creditcoin"><span>02</span><strong>Creditcoin</strong><small>Open registration</small></div>
+            <div className="chain-node creditcoin"><span>02</span><strong>Creditcoin</strong><small>Funded claim</small></div>
           </div>
           <dl className="rule-data">
             <div><dt>Recipient</dt><dd>{short(campaign.recipient, 8)}</dd></div>
@@ -135,8 +135,8 @@ function CampaignView({ campaign, loading, account, connect, reload, notify }) {
           </dl>
           <div className="principles">
             <span><Check size={15} /> No claimant cap</span>
-            <span><Check size={15} /> Equal pro-rata share</span>
-            <span><Check size={15} /> Sponsor cannot cancel</span>
+            <span><Check size={15} /> Equal pro-rata payout</span>
+            <span><Check size={15} /> Reserve cannot be cancelled</span>
           </div>
         </div>
 
@@ -144,10 +144,10 @@ function CampaignView({ campaign, loading, account, connect, reload, notify }) {
       </section>
 
       <section className="activity-band">
-        <div className="section-title"><div><span>LIVE EVIDENCE</span><h2>The rule has already been exercised.</h2></div></div>
+          <div className="section-title"><div><span>LIVE SETTLEMENT EVIDENCE</span><h2>A historical payment already created a Creditcoin claim.</h2></div></div>
         <div className="activity-row">
           <StatusIcon icon={FileCheck2} />
-          <div><strong>Historical proof accepted</strong><span>Ethereum mainnet · 1,000 USDC · block 25,049,872</span></div>
+          <div><strong>Payment entitlement registered</strong><span>Ethereum mainnet · 1,000 USDC · block 25,049,872</span></div>
           <code>0x6470…de5e</code>
           <a href={`${EXPLORER}/tx/0x6470d1850b4444a0627cc997bacc982af8757bb2682bf272422e0100f871de5e`} target="_blank" rel="noreferrer">Receipt <ExternalLink size={13} /></a>
         </div>
@@ -196,15 +196,15 @@ function ClaimPanel({ campaign, account, connect, reload, notify }) {
   return (
     <aside className="claim-panel" aria-labelledby="claim-heading">
       <div className="step-label">YOUR CLAIM</div>
-      <h2 id="claim-heading">{registered ? "Registration confirmed" : "Prove your transfer"}</h2>
+      <h2 id="claim-heading">{registered ? "Claim confirmed" : "Prove the payment"}</h2>
       {registered ? (
         <div className="registered-state">
           <div className="success-seal"><ShieldCheck size={36} /><span>Verified</span></div>
-          <p>This wallet is registered in campaign #{campaign.id}. Its share becomes fixed when registration closes.</p>
+          <p>This wallet has established its entitlement in claim #{campaign.id}. Its payout becomes fixed when registration closes.</p>
           <div className="claim-state-row"><span>Wallet</span><code>{short(account, 8)}</code></div>
           <div className="claim-state-row"><span>Current estimated share</span><strong>{campaign.claimantCount ? formatShare(campaign) : "—"} tCTC</strong></div>
-          {campaign.finalized && !withdrawn && <button className="primary" onClick={withdraw} disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <CircleDollarSign />} Withdraw reward</button>}
-          {withdrawn && <div className="complete-message"><Check /> Reward withdrawn</div>}
+          {campaign.finalized && !withdrawn && <button className="primary" onClick={withdraw} disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <CircleDollarSign />} Withdraw payout</button>}
+          {withdrawn && <div className="complete-message"><Check /> Payout withdrawn</div>}
           {!campaign.finalized && <div className="waiting"><Clock3 /> Final share locks after {formatDate(campaign.registrationDeadline)}</div>}
         </div>
       ) : (
@@ -218,7 +218,7 @@ function ClaimPanel({ campaign, account, connect, reload, notify }) {
             <li><ShieldCheck /> Attestcoin proof passes onchain</li>
           </ol>
           <button className="primary" onClick={prepareAndSubmit} disabled={busy || (!account && false)}>
-            {busy ? <><LoaderCircle className="spin" /> Building proof…</> : account ? <><ShieldCheck /> Verify and register</> : <><Wallet /> Connect wallet</>}
+            {busy ? <><LoaderCircle className="spin" /> Building proof…</> : account ? <><ShieldCheck /> Verify eligibility</> : <><Wallet /> Connect wallet</>}
           </button>
           <small className="transaction-note">Zero-value registration. You only pay Creditcoin testnet gas.</small>
         </>
@@ -251,23 +251,23 @@ function SponsorView({ account, connect, notify }) {
   return (
     <section className="sponsor-layout">
       <div className="sponsor-copy">
-        <div className="eyebrow">FOR SPONSORS</div>
-        <h1>Commit to a rule.<br />Not a private list.</h1>
-        <p>Fund the complete pool at creation. Once published, no administrator can change eligibility, cap claimants, or cancel registration.</p>
+        <div className="eyebrow">FOR PROTOCOLS, DAOS AND MERCHANTS</div>
+        <h1>Fund what you owe.<br />Publish who qualifies.</h1>
+        <p>Create open compensation, rebate, or recovery claims from verified source-chain activity. Once published, no administrator can rewrite eligibility or withdraw the reserve.</p>
         <div className="sponsor-steps">
-          <div><span>01</span><strong>Snapshot history</strong><small>Choose an already-attested Ethereum block range.</small></div>
-          <div><span>02</span><strong>Fund in full</strong><small>The displayed reward pool enters the contract immediately.</small></div>
-          <div><span>03</span><strong>Let wallets prove</strong><small>Claimants bring evidence; the contract decides.</small></div>
+          <div><span>01</span><strong>Publish the obligation</strong><small>Choose a reviewed event template and an already-attested Ethereum window.</small></div>
+          <div><span>02</span><strong>Reserve the payout</strong><small>The complete displayed claim pool enters the contract immediately.</small></div>
+          <div><span>03</span><strong>Let users establish inclusion</strong><small>Claimants bring source evidence; the contract applies the rule.</small></div>
         </div>
       </div>
       <form className="campaign-form" onSubmit={createCampaign}>
-        <div className="form-heading"><Plus size={20} /><div><strong>Create campaign</strong><span>Creditcoin testnet</span></div></div>
+        <div className="form-heading"><Plus size={20} /><div><strong>Create payment rebate</strong><span>Live V1 template · Creditcoin testnet</span></div></div>
         <Field label="Ethereum USDC recipient" value={form.recipient} onChange={set("recipient")} placeholder="0x…" />
-        <div className="field-grid"><Field label="Minimum USDC" type="number" value={form.minimum} onChange={set("minimum")} /><Field label="Reward pool (tCTC)" type="number" value={form.pool} onChange={set("pool")} /></div>
+        <div className="field-grid"><Field label="Minimum USDC" type="number" value={form.minimum} onChange={set("minimum")} /><Field label="Claim reserve (tCTC)" type="number" value={form.pool} onChange={set("pool")} /></div>
         <div className="field-grid"><Field label="Start block" type="number" value={form.startBlock} onChange={set("startBlock")} /><Field label="End block" type="number" value={form.endBlock} onChange={set("endBlock")} /></div>
         <div className="field-grid"><Field label="Registration hours" type="number" value={form.registrationHours} onChange={set("registrationHours")} /><Field label="Withdrawal days" type="number" value={form.withdrawalDays} onChange={set("withdrawalDays")} /></div>
-        <div className="immutability-note"><LockKeyhole /> Rule and pool become immutable after signing.</div>
-        <button className="primary" type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <LockKeyhole />} {account ? "Fund and publish rule" : "Connect sponsor wallet"}</button>
+        <div className="immutability-note"><LockKeyhole /> Eligibility and reserve become immutable after signing.</div>
+        <button className="primary" type="submit" disabled={busy}>{busy ? <LoaderCircle className="spin" /> : <LockKeyhole />} {account ? "Fund and publish claim" : "Connect funding wallet"}</button>
       </form>
     </section>
   );

@@ -6,6 +6,7 @@ import {EvmV1Decoder} from "@gluwa/usc-contracts/contracts/decoding/EvmV1Decoder
 import {AttestcoinClaimVerifier} from "../src/AttestcoinClaimVerifier.sol";
 import {RuleDropPool} from "../src/RuleDropPool.sol";
 import {USDCTransferPredicateV1} from "../src/USDCTransferPredicateV1.sol";
+import {ContractInteractionPredicateV1} from "../src/ContractInteractionPredicateV1.sol";
 import {INativeQueryVerifier} from "../src/interfaces/INativeQueryVerifier.sol";
 import {MockChainInfo} from "./mocks/MockChainInfo.sol";
 import {MockNativeQueryVerifier} from "./mocks/MockNativeQueryVerifier.sol";
@@ -16,6 +17,9 @@ contract RuleDropTest is Test {
     address private constant RECIPIENT = address(0xBEEF);
     address private constant CLAIMANT_ONE = address(0xC101);
     address private constant CLAIMANT_TWO = address(0xC102);
+    address private constant INTERACTION_TARGET = address(0xD00D);
+    bytes4 private constant INTERACTION_SELECTOR = bytes4(keccak256("repay(uint256)"));
+    bytes32 private constant INTERACTION_EVENT = keccak256("Repaid(address,uint256)");
 
     uint64 private constant START_BLOCK = 24_000_000;
     uint64 private constant END_BLOCK = 25_000_000;
@@ -206,11 +210,179 @@ contract RuleDropTest is Test {
         assertEq(SPONSOR.balance - sponsorBefore, 5 ether);
     }
 
+    function testAmountWeightedCampaignPaysByCappedSourceAmount() external {
+        vm.prank(SPONSOR);
+        uint256 campaignId = pool.createWeightedTransferCampaign{value: 10 ether}(
+            RECIPIENT,
+            50e6,
+            200e6,
+            START_BLOCK,
+            END_BLOCK,
+            uint64(block.timestamp + 3 days),
+            uint64(block.timestamp + 7 days)
+        );
+
+        vm.prank(CLAIMANT_ONE);
+        pool.registerClaim(campaignId, _proof(_encodedTransfer(CLAIMANT_ONE, RECIPIENT, 300e6, 1), SOURCE_BLOCK));
+        nativeVerifier.setTransactionIndex(8);
+        vm.prank(CLAIMANT_TWO);
+        pool.registerClaim(campaignId, _proof(_encodedTransfer(CLAIMANT_TWO, RECIPIENT, 100e6, 1), SOURCE_BLOCK));
+
+        assertEq(pool.claimWeights(campaignId, CLAIMANT_ONE), 200e6);
+        assertEq(pool.claimWeights(campaignId, CLAIMANT_TWO), 100e6);
+
+        vm.warp(block.timestamp + 4 days);
+        pool.finalize(campaignId);
+        uint256 oneBefore = CLAIMANT_ONE.balance;
+        uint256 twoBefore = CLAIMANT_TWO.balance;
+        vm.prank(CLAIMANT_ONE);
+        pool.withdraw(campaignId);
+        vm.prank(CLAIMANT_TWO);
+        pool.withdraw(campaignId);
+
+        uint256 payoutPerWeight = uint256(10 ether) / uint256(300e6);
+        assertEq(CLAIMANT_ONE.balance - oneBefore, uint256(200e6) * payoutPerWeight);
+        assertEq(CLAIMANT_TWO.balance - twoBefore, uint256(100e6) * payoutPerWeight);
+    }
+
+    function testInteractionClaimRegistersWithRequiredEvent() external {
+        uint256 campaignId = _createInteractionCampaign();
+        bytes memory encoded = _encodedInteraction(
+            CLAIMANT_ONE, INTERACTION_TARGET, INTERACTION_SELECTOR, 1, INTERACTION_TARGET, INTERACTION_EVENT
+        );
+
+        vm.prank(CLAIMANT_ONE);
+        pool.registerInteractionClaim(campaignId, _proof(encoded, SOURCE_BLOCK));
+
+        assertTrue(pool.registered(campaignId, CLAIMANT_ONE));
+        assertEq(pool.claimWeights(campaignId, CLAIMANT_ONE), 1);
+        RuleDropPool.Campaign memory campaign = pool.getCampaign(campaignId);
+        assertEq(uint256(campaign.claimTemplate), uint256(RuleDropPool.ClaimTemplate.ContractInteraction));
+        assertEq(campaign.totalWeight, 1);
+    }
+
+    function testInteractionRejectsWrongTargetAndSelector() external {
+        uint256 campaignId = _createInteractionCampaign();
+
+        vm.prank(CLAIMANT_ONE);
+        vm.expectRevert(ContractInteractionPredicateV1.InvalidSourceTransaction.selector);
+        pool.registerInteractionClaim(
+            campaignId,
+            _proof(
+                _encodedInteraction(
+                    CLAIMANT_ONE, address(0xBAD), INTERACTION_SELECTOR, 1, INTERACTION_TARGET, INTERACTION_EVENT
+                ),
+                SOURCE_BLOCK
+            )
+        );
+
+        vm.prank(CLAIMANT_ONE);
+        vm.expectRevert(ContractInteractionPredicateV1.InvalidCalldata.selector);
+        pool.registerInteractionClaim(
+            campaignId,
+            _proof(
+                _encodedInteraction(
+                    CLAIMANT_ONE,
+                    INTERACTION_TARGET,
+                    bytes4(keccak256("borrow(uint256)")),
+                    1,
+                    INTERACTION_TARGET,
+                    INTERACTION_EVENT
+                ),
+                SOURCE_BLOCK
+            )
+        );
+    }
+
+    function testInteractionRejectsRevertAndMissingRequiredEvent() external {
+        uint256 campaignId = _createInteractionCampaign();
+
+        vm.prank(CLAIMANT_ONE);
+        vm.expectRevert(ContractInteractionPredicateV1.InvalidReceipt.selector);
+        pool.registerInteractionClaim(
+            campaignId,
+            _proof(
+                _encodedInteraction(
+                    CLAIMANT_ONE, INTERACTION_TARGET, INTERACTION_SELECTOR, 0, INTERACTION_TARGET, INTERACTION_EVENT
+                ),
+                SOURCE_BLOCK
+            )
+        );
+
+        vm.prank(CLAIMANT_ONE);
+        vm.expectRevert(ContractInteractionPredicateV1.RequiredEventMissing.selector);
+        pool.registerInteractionClaim(
+            campaignId,
+            _proof(
+                _encodedInteraction(
+                    CLAIMANT_ONE, INTERACTION_TARGET, INTERACTION_SELECTOR, 1, address(0xBAD), INTERACTION_EVENT
+                ),
+                SOURCE_BLOCK
+            )
+        );
+    }
+
+    function testInteractionRejectsEventBoundToAnotherWallet() external {
+        uint256 campaignId = _createInteractionCampaign();
+        vm.prank(CLAIMANT_ONE);
+        vm.expectRevert(ContractInteractionPredicateV1.RequiredEventMissing.selector);
+        pool.registerInteractionClaim(
+            campaignId,
+            _proof(
+                _encodedInteractionWithTopicClaimant(
+                    CLAIMANT_ONE,
+                    INTERACTION_TARGET,
+                    INTERACTION_SELECTOR,
+                    1,
+                    INTERACTION_TARGET,
+                    INTERACTION_EVENT,
+                    CLAIMANT_TWO
+                ),
+                SOURCE_BLOCK
+            )
+        );
+    }
+
+    function testCampaignRejectsWrongRegistrationFunction() external {
+        uint256 campaignId = _createInteractionCampaign();
+        vm.prank(CLAIMANT_ONE);
+        vm.expectRevert(RuleDropPool.InvalidClaimTemplate.selector);
+        pool.registerClaim(campaignId, _proof(_encodedTransfer(CLAIMANT_ONE, RECIPIENT, 150e6, 1), SOURCE_BLOCK));
+
+        uint256 transferCampaignId = _createCampaign(1 ether);
+        vm.prank(CLAIMANT_ONE);
+        vm.expectRevert(RuleDropPool.InvalidClaimTemplate.selector);
+        pool.registerInteractionClaim(
+            transferCampaignId,
+            _proof(
+                _encodedInteraction(
+                    CLAIMANT_ONE, INTERACTION_TARGET, INTERACTION_SELECTOR, 1, INTERACTION_TARGET, INTERACTION_EVENT
+                ),
+                SOURCE_BLOCK
+            )
+        );
+    }
+
     function _createCampaign(uint256 amount) private returns (uint256 campaignId) {
         vm.prank(SPONSOR);
         campaignId = pool.createCampaign{value: amount}(
             RECIPIENT,
             MINIMUM_AMOUNT,
+            START_BLOCK,
+            END_BLOCK,
+            uint64(block.timestamp + 3 days),
+            uint64(block.timestamp + 7 days)
+        );
+    }
+
+    function _createInteractionCampaign() private returns (uint256 campaignId) {
+        vm.prank(SPONSOR);
+        campaignId = pool.createInteractionCampaign{value: 10 ether}(
+            INTERACTION_TARGET,
+            INTERACTION_SELECTOR,
+            INTERACTION_TARGET,
+            INTERACTION_EVENT,
+            1,
             START_BLOCK,
             END_BLOCK,
             uint64(block.timestamp + 3 days),
@@ -264,6 +436,50 @@ contract RuleDropTest is Test {
         topics[1] = bytes32(uint256(uint160(sender)));
         topics[2] = bytes32(uint256(uint160(recipient)));
         logs[0] = EvmV1Decoder.LogEntryTuple({address_: emitter, topics: topics, data: abi.encode(amount)});
+        bytes memory receipt = abi.encode(receiptStatus, uint64(50_000), logs, new bytes(256));
+
+        bytes[] memory chunks = new bytes[](3);
+        chunks[0] = common;
+        chunks[1] = typeSpecific;
+        chunks[2] = receipt;
+        return abi.encode(uint8(2), chunks);
+    }
+
+    function _encodedInteraction(
+        address sender,
+        address target,
+        bytes4 selector,
+        uint8 receiptStatus,
+        address eventEmitter,
+        bytes32 eventSignature
+    ) private pure returns (bytes memory) {
+        return _encodedInteractionWithTopicClaimant(
+            sender, target, selector, receiptStatus, eventEmitter, eventSignature, sender
+        );
+    }
+
+    function _encodedInteractionWithTopicClaimant(
+        address sender,
+        address target,
+        bytes4 selector,
+        uint8 receiptStatus,
+        address eventEmitter,
+        bytes32 eventSignature,
+        address topicClaimant
+    ) private pure returns (bytes memory) {
+        bytes memory calldata_ = abi.encodeWithSelector(selector, uint256(100e6));
+        bytes memory common = abi.encode(uint64(1), uint64(100_000), sender, false, target, uint256(0), calldata_);
+
+        EvmV1Decoder.AccessListEntry[] memory accessList = new EvmV1Decoder.AccessListEntry[](0);
+        bytes memory typeSpecific = abi.encode(
+            uint64(1), uint128(1), uint128(2), accessList, uint8(0), bytes32(uint256(1)), bytes32(uint256(2))
+        );
+
+        EvmV1Decoder.LogEntryTuple[] memory logs = new EvmV1Decoder.LogEntryTuple[](1);
+        bytes32[] memory topics = new bytes32[](2);
+        topics[0] = eventSignature;
+        topics[1] = bytes32(uint256(uint160(topicClaimant)));
+        logs[0] = EvmV1Decoder.LogEntryTuple({address_: eventEmitter, topics: topics, data: abi.encode(uint256(100e6))});
         bytes memory receipt = abi.encode(receiptStatus, uint64(50_000), logs, new bytes(256));
 
         bytes[] memory chunks = new bytes[](3);
