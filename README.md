@@ -2,6 +2,8 @@
 
 **Rules, not lists.**
 
+Live application: [ruledrop.dolepee.com](https://ruledrop.dolepee.com)
+
 RuleDrop turns verified Ethereum mainnet history into permissionless rewards on Creditcoin. A sponsor fully funds an immutable rule; any wallet that proves the exact historical action through Attestcoin can register and withdraw its equal pro-rata share after registration closes.
 
 The MVP supports one deliberately narrow predicate: a direct, successful Ethereum mainnet USDC `transfer(address,uint256)` to an exact recipient, above an exact amount, inside an immutable historical block range.
@@ -35,6 +37,8 @@ The RuleDrop contracts and a fully funded `10 tCTC` campaign are also live on Cr
 ## Application worker
 
 The Node worker reads live campaign state, uses fallback Ethereum RPCs for early validation, retries and caches Attestcoin proofs, and returns claim calldata only after the exact onchain call simulates successfully. See [the worker API](docs/WORKER_API.md).
+
+The application and worker run as one Docker service on Render behind the stable `ruledrop.dolepee.com` hostname. `/health` exposes destination-network identity for provider monitoring.
 
 ## Local verification
 
