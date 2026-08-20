@@ -33,7 +33,8 @@ const CC_RPC = process.env.CREDITCOIN_RPC ?? "https://rpc.cc3-testnet.creditcoin
 const SEPOLIA_RPC = process.env.SEPOLIA_RPC_URL ?? "https://ethereum-sepolia-rpc.publicnode.com";
 const PROOF_BUILDER = process.env.ATTESTCOIN_PROOF_BUILDER
   ?? "https://prover.cc3-testnet.creditcoin.network";
-const CHAIN_INFO = "0x0000000000000000000000000000000000000fD3";
+const NATIVE_VERIFIER = getAddress("0x0000000000000000000000000000000000000fd2");
+const CHAIN_INFO = getAddress("0x0000000000000000000000000000000000000fd3");
 const MINIMUM_CC_BALANCE = parseEther("0.5");
 const MINIMUM_SEPOLIA_BALANCE = parseEther("0.0015");
 const RELAYER_TARGET_BALANCE = parseEther("0.02");
@@ -85,6 +86,7 @@ async function main() {
   const [mode, statePath, label] = process.argv.slice(2);
   if (![
     "source-infra-status",
+    "infrastructure-status",
     "deploy-infra",
     "prepare-credit",
     "execute-source",
@@ -92,7 +94,7 @@ async function main() {
     "prove-release",
   ].includes(mode)) {
     throw new Error(
-      "usage: node scripts/retrycredit-spike-runner.mjs <source-infra-status|deploy-infra|prepare-credit|execute-source|attestation-status|prove-release> [state.json] [label]",
+      "usage: node scripts/retrycredit-spike-runner.mjs <source-infra-status|infrastructure-status|deploy-infra|prepare-credit|execute-source|attestation-status|prove-release> [state.json] [label]",
     );
   }
   const ccProvider = new JsonRpcProvider(CC_RPC, CC_CHAIN_ID, { staticNetwork: true });
@@ -111,6 +113,22 @@ async function main() {
       operator: sourceState.operator,
       contracts: sourceState.contracts,
       truthBoundary: sourceState.truthBoundary,
+      ready: true,
+    });
+    return;
+  }
+  if (mode === "infrastructure-status") {
+    const state = await loadState(statePath);
+    validateInfrastructureState(state, EXPECTED_OPERATOR);
+    await authenticateInfrastructure(state, ccProvider, sepoliaProvider);
+    output({
+      schemaVersion: state.schemaVersion,
+      stage: "infrastructure-authenticated",
+      checkedAt: new Date().toISOString(),
+      operator: state.operator,
+      relayer: state.relayer,
+      contracts: state.contracts,
+      truthBoundary: state.truthBoundary,
       ready: true,
     });
     return;
@@ -946,7 +964,7 @@ async function authenticateInfrastructure(state, ccProvider, sepoliaProvider) {
     Number(verifierSourceChainKey) !== SEPOLIA_CHAIN_KEY
     || Number(verifierSourceChainId) !== SEPOLIA_CHAIN_ID
     || getAddress(verifierPredicate) !== getAddress(state.contracts.predicate)
-    || getAddress(nativeVerifier) !== getAddress("0x0000000000000000000000000000000000000fD2")
+    || getAddress(nativeVerifier) !== NATIVE_VERIFIER
   ) {
     throw new Error("Attestcoin verifier immutables do not match the native sponsor stack");
   }
