@@ -1,7 +1,8 @@
-import { Contract, Interface, JsonRpcProvider, formatEther, formatUnits, getAddress, isHexString } from "ethers";
+import { AbiCoder, Contract, Interface, JsonRpcProvider, formatEther, formatUnits, getAddress, isHexString, keccak256 } from "ethers";
 import { proofProvider } from "@gluwa/usc-sdk";
 
 export const ETHEREUM_CHAIN_KEY = 3;
+export const SEPOLIA_CHAIN_KEY = 1;
 export const CREDITCOIN_CHAIN_ID = 102031;
 export const CANONICAL_USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 export const TRANSFER_SELECTOR = "0xa9059cbb";
@@ -10,6 +11,9 @@ export const PAYOUT_POLICIES = Object.freeze({ EQUAL: 0, SOURCE_AMOUNT_WEIGHTED:
 
 const DEFAULT_PROOF_BUILDER = "https://prover.cc3-testnet.creditcoin.network";
 const DEFAULT_CREDITCOIN_RPC = "https://rpc.cc3-testnet.creditcoin.network";
+const RETRY_BATCH_SIZE = 2;
+const MAX_BATCH_BLOCK_SPAN = 1_000;
+const abiCoder = AbiCoder.defaultAbiCoder();
 
 export class WorkerError extends Error {
   constructor(code, message, status = 400, cause) {
@@ -75,6 +79,62 @@ export function toContractProof(proof) {
   };
 }
 
+export function decodeAttestedTransaction(encodedTransaction) {
+  try {
+    if (!isHexString(encodedTransaction) || encodedTransaction === "0x") {
+      throw new Error("empty or non-hex encoded transaction");
+    }
+    const [transactionTypeValue, chunksValue] = abiCoder.decode(["uint8", "bytes[]"], encodedTransaction);
+    const transactionType = Number(transactionTypeValue);
+    const chunks = Array.from(chunksValue);
+    const expectedChunkCount = transactionType <= 2 ? 3 : 4;
+    if (!Number.isInteger(transactionType) || transactionType < 0 || transactionType > 4) {
+      throw new Error(`unsupported EVM transaction type ${transactionType}`);
+    }
+    if (chunks.length !== expectedChunkCount) {
+      throw new Error(`invalid chunk count ${chunks.length} for EVM transaction type ${transactionType}`);
+    }
+
+    const [nonce, gasLimit, sender, toIsNull, target, value, data] = abiCoder.decode(
+      ["uint64", "uint64", "address", "bool", "address", "uint256", "bytes"],
+      chunks[0],
+    );
+    const receiptChunk = chunks[expectedChunkCount - 1];
+    const [receiptStatus, receiptGasUsed, receiptLogs] = abiCoder.decode(
+      ["uint8", "uint64", "tuple(address address_,bytes32[] topics,bytes data)[]", "bytes"],
+      receiptChunk,
+    );
+    const calldata = String(data).toLowerCase();
+
+    return {
+      transactionType,
+      nonce: nonce.toString(),
+      gasLimit: gasLimit.toString(),
+      sender: getAddress(sender),
+      target: toIsNull ? null : getAddress(target),
+      value: value.toString(),
+      selector: calldata.length >= 10 ? calldata.slice(0, 10) : "0x",
+      calldataHash: keccak256(calldata),
+      receiptStatus: Number(receiptStatus),
+      receiptGasUsed: receiptGasUsed.toString(),
+      logCount: receiptLogs.length,
+    };
+  } catch (error) {
+    if (error instanceof WorkerError) throw error;
+    throw new WorkerError("BATCH_PROOF_INVALID", "The Attestcoin proof contains an invalid encoded transaction", 502, error);
+  }
+}
+
+export function toContractBatchProof(batchProof) {
+  return {
+    chainKey: batchProof.chainKey,
+    sourceBlocks: batchProof.entries.map((entry) => entry.sourceBlock),
+    encodedTransactions: batchProof.entries.map((entry) => entry.encodedTransaction),
+    merkleProofs: batchProof.entries.map((entry) => entry.merkleProof),
+    continuityProof: batchProof.continuityProof,
+  };
+}
+
 export function serializeCampaign(campaign, campaignId, now = Math.floor(Date.now() / 1000)) {
   const registrationDeadline = Number(campaign.registrationDeadline);
   const withdrawalDeadline = Number(campaign.withdrawalDeadline);
@@ -120,14 +180,16 @@ export class RuleDropWorker {
     proofBuilder,
     creditcoinProvider,
     poolContract,
+    sourceChainKey = ETHEREUM_CHAIN_KEY,
   }) {
     this.poolAddress = validateAddress(poolAddress, "pool address");
     this.poolAbi = poolAbi;
     this.poolInterface = new Interface(poolAbi);
     this.creditcoinProvider = creditcoinProvider ?? new JsonRpcProvider(creditcoinRpc, CREDITCOIN_CHAIN_ID, { staticNetwork: true });
     this.pool = poolContract ?? new Contract(this.poolAddress, poolAbi, this.creditcoinProvider);
+    this.sourceChainKey = validateSourceChainKey(sourceChainKey);
     this.proofBuilder = proofBuilder
-      ?? new proofProvider.service.ProofBuilder(ETHEREUM_CHAIN_KEY, proofBuilderUrl, 120_000);
+      ?? new proofProvider.service.ProofBuilder(this.sourceChainKey, proofBuilderUrl, 120_000);
     this.ethereumProviders = ethereumProviders;
     this.cache = cache;
     this.proofAttempts = proofAttempts;
@@ -244,6 +306,30 @@ export class RuleDropWorker {
     throw new WorkerError("PROOF_UNAVAILABLE", "The Attestcoin proof service is temporarily unavailable", 503, lastError);
   }
 
+  async getRetryBatchProof({ failedTransactionHash, successfulTransactionHash }) {
+    const hashes = validateRetryBatchHashes(failedTransactionHash, successfulTransactionHash);
+    const cacheKey = `retry-batch:${this.sourceChainKey}:${hashes.join(":")}`;
+    const cached = this.cache.get(cacheKey);
+    if (cached) return cached;
+
+    let lastError;
+    for (let attempt = 1; attempt <= this.proofAttempts; attempt += 1) {
+      try {
+        const result = await this.proofBuilder.getBatchProof(hashes);
+        if (!result.success || !result.data) {
+          throw new Error(result.error || "Proof builder rejected the batch request");
+        }
+        const normalized = normalizeRetryBatchProof(result.data, hashes, this.sourceChainKey);
+        return this.cache.set(cacheKey, normalized);
+      } catch (error) {
+        if (error instanceof WorkerError) throw error;
+        lastError = error;
+        if (attempt < this.proofAttempts) await delay(250 * 2 ** (attempt - 1));
+      }
+    }
+    throw new WorkerError("BATCH_PROOF_UNAVAILABLE", "The Attestcoin batch proof service is temporarily unavailable", 503, lastError);
+  }
+
   async fetchSourceTransaction(transactionHash) {
     if (this.ethereumProviders.length === 0) return null;
     let lastError;
@@ -289,6 +375,152 @@ export class RuleDropWorker {
       throw new WorkerError("BLOCK_OUTSIDE_CAMPAIGN", "The source transaction is outside the campaign block range");
     }
   }
+}
+
+function validateRetryBatchHashes(failedTransactionHash, successfulTransactionHash) {
+  const hashes = [
+    validateTransactionHash(failedTransactionHash),
+    validateTransactionHash(successfulTransactionHash),
+  ];
+  if (new Set(hashes).size !== RETRY_BATCH_SIZE) {
+    throw new WorkerError("DUPLICATE_TRANSACTION_HASH", "Failure and retry transaction hashes must be different");
+  }
+  return hashes;
+}
+
+function validateSourceChainKey(value) {
+  const chainKey = Number(value);
+  if (!Number.isSafeInteger(chainKey) || chainKey <= 0) {
+    throw new WorkerError("INVALID_SOURCE_CHAIN", "A positive Attestcoin source chain key is required");
+  }
+  return chainKey;
+}
+
+function normalizeRetryBatchProof(proof, requestedHashes, expectedChainKey) {
+  try {
+    if (Number(proof.chainKey) !== expectedChainKey) {
+      throw new Error(`unexpected source chain key ${proof.chainKey}`);
+    }
+    const fromHeader = requireSafeInteger(proof.fromHeader, "fromHeader");
+    const toHeader = requireSafeInteger(proof.toHeader, "toHeader");
+    if (fromHeader > toHeader || toHeader - fromHeader > MAX_BATCH_BLOCK_SPAN) {
+      throw new Error(`invalid batch block range ${fromHeader}-${toHeader}`);
+    }
+    if (!(proof.merkleProofs instanceof Map)) throw new Error("merkleProofs must be a Map");
+
+    const entriesByHash = new Map();
+    for (const [sourceBlockValue, blockProofs] of proof.merkleProofs.entries()) {
+      const sourceBlock = requireSafeInteger(sourceBlockValue, "sourceBlock");
+      if (sourceBlock < fromHeader || sourceBlock > toHeader) {
+        throw new Error(`source block ${sourceBlock} is outside the shared proof range`);
+      }
+      if (!(blockProofs instanceof Map)) throw new Error("per-block merkle proofs must be a Map");
+      for (const [transactionIndexValue, entry] of blockProofs.entries()) {
+        const transactionIndex = requireSafeInteger(transactionIndexValue, "transactionIndex");
+        const transactionHash = validateTransactionHash(entry.txHash);
+        if (!requestedHashes.includes(transactionHash)) {
+          throw new Error(`unexpected transaction ${transactionHash} in batch proof`);
+        }
+        if (entriesByHash.has(transactionHash)) {
+          throw new Error(`duplicate transaction ${transactionHash} in batch proof`);
+        }
+        validateMerkleProof(entry.merkleProof);
+        entriesByHash.set(transactionHash, {
+          transactionHash,
+          sourceBlock,
+          transactionIndex,
+          encodedTransaction: entry.txBytes,
+          merkleProof: entry.merkleProof,
+          metadata: decodeAttestedTransaction(entry.txBytes),
+        });
+      }
+    }
+
+    if (entriesByHash.size !== RETRY_BATCH_SIZE || requestedHashes.some((hash) => !entriesByHash.has(hash))) {
+      throw new Error("batch proof did not contain exactly the two requested transactions");
+    }
+    validateContinuityProof(proof.continuityProof);
+
+    const failed = entriesByHash.get(requestedHashes[0]);
+    const successful = entriesByHash.get(requestedHashes[1]);
+    validateRetryRelationship(failed, successful);
+    const entries = [failed, successful];
+
+    return {
+      chainKey: expectedChainKey,
+      fromHeader,
+      toHeader,
+      entries,
+      continuityProof: proof.continuityProof,
+      summary: {
+        sourceChainKey: expectedChainKey,
+        fromBlock: fromHeader,
+        toBlock: toHeader,
+        blockSpan: toHeader - fromHeader,
+        continuityRootCount: proof.continuityProof.roots.length,
+        failed: summarizeBatchEntry(failed),
+        successful: summarizeBatchEntry(successful),
+      },
+    };
+  } catch (error) {
+    if (error instanceof WorkerError && error.code === "BATCH_PROOF_INVALID") throw error;
+    throw new WorkerError("BATCH_PROOF_INVALID", "The Attestcoin batch proof did not match the requested retry", 502, error);
+  }
+}
+
+function validateRetryRelationship(failed, successful) {
+  if (failed.metadata.receiptStatus !== 0) throw new Error("the first transaction did not fail");
+  if (successful.metadata.receiptStatus !== 1) throw new Error("the retry transaction did not succeed");
+  if (failed.metadata.sender !== successful.metadata.sender) throw new Error("failure and retry senders differ");
+  if (!failed.metadata.target || failed.metadata.target !== successful.metadata.target) {
+    throw new Error("failure and retry targets differ");
+  }
+  if (failed.metadata.selector === "0x" || failed.metadata.selector !== successful.metadata.selector) {
+    throw new Error("failure and retry function selectors differ");
+  }
+  if (failed.metadata.calldataHash !== successful.metadata.calldataHash) {
+    throw new Error("failure and retry calldata differ");
+  }
+  if (failed.metadata.value !== successful.metadata.value) throw new Error("failure and retry values differ");
+  if (BigInt(successful.metadata.nonce) !== BigInt(failed.metadata.nonce) + 1n) {
+    throw new Error("the retry nonce is not consecutive");
+  }
+  if (failed.sourceBlock >= successful.sourceBlock) {
+    throw new Error("the successful retry does not occur after the failed transaction");
+  }
+}
+
+function summarizeBatchEntry(entry) {
+  return {
+    transactionHash: entry.transactionHash,
+    sourceBlock: entry.sourceBlock,
+    transactionIndex: entry.transactionIndex,
+    ...entry.metadata,
+  };
+}
+
+function requireSafeInteger(value, label) {
+  const integer = Number(value);
+  if (!Number.isSafeInteger(integer) || integer < 0) throw new Error(`invalid ${label}`);
+  return integer;
+}
+
+function validateMerkleProof(proof) {
+  if (!proof || !isHexString(proof.root, 32) || !Array.isArray(proof.siblings)) {
+    throw new Error("invalid transaction merkle proof");
+  }
+  for (const sibling of proof.siblings) {
+    if (!isHexString(sibling.hash, 32) || typeof sibling.isLeft !== "boolean") {
+      throw new Error("invalid transaction merkle proof sibling");
+    }
+  }
+}
+
+function validateContinuityProof(proof) {
+  if (!proof || !isHexString(proof.lowerEndpointDigest, 32) || !Array.isArray(proof.roots)) {
+    throw new Error("invalid continuity proof");
+  }
+  if (proof.roots.some((root) => !isHexString(root, 32))) throw new Error("invalid continuity proof root");
 }
 
 function serializeInteractionRule(rule) {

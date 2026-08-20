@@ -1,11 +1,24 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ExpiringCache, RuleDropWorker, WorkerError, serializeCampaign, validateTransactionHash } from "../src/proof-worker.mjs";
+import { AbiCoder } from "ethers";
+import {
+  ExpiringCache,
+  RuleDropWorker,
+  SEPOLIA_CHAIN_KEY,
+  WorkerError,
+  decodeAttestedTransaction,
+  serializeCampaign,
+  toContractBatchProof,
+  validateTransactionHash,
+} from "../src/proof-worker.mjs";
 import { poolAbiV2 } from "../src/pool-abi.mjs";
 
 const POOL = "0x6f8dE7e1599A0c8D38eB25996cB841a4920ed999";
 const CLAIMANT = "0xbad35FA6e368e90fC4faf63507F2D0A2Fdf94BAF";
 const TX_HASH = `0x${"ab".repeat(32)}`;
+const RETRY_TX_HASH = `0x${"cd".repeat(32)}`;
+const TARGET = "0x1111111111111111111111111111111111111111";
+const abiCoder = AbiCoder.defaultAbiCoder();
 const ABI = [
   "function registerClaim(uint256 campaignId,(uint64 sourceBlock,bytes encodedTransaction,bytes32 merkleRoot,(bytes32 hash,bool isLeft)[] siblings,bytes32 lowerEndpointDigest,bytes32[] continuityRoots) proof)",
 ];
@@ -58,6 +71,142 @@ test("proof failure returns a stable service error", async () => {
     assert.equal(error.status, 503);
     return true;
   });
+});
+
+test("decodes only safe metadata from an Attestcoin encoded transaction", () => {
+  const encoded = encodedTransactionFixture({ status: 0, nonce: 8n });
+  const result = decodeAttestedTransaction(encoded);
+  assert.deepEqual(result, {
+    transactionType: 2,
+    nonce: "8",
+    gasLimit: "100000",
+    sender: CLAIMANT,
+    target: TARGET,
+    value: "0",
+    selector: "0x12345678",
+    calldataHash: "0x30ca65d5da355227c97ff836c9c6719af9d3835fc6bc72bddc50eeecc1bb2b25",
+    receiptStatus: 0,
+    receiptGasUsed: "50000",
+    logCount: 0,
+  });
+  assert.equal("data" in result, false);
+  assert.equal("logs" in result, false);
+});
+
+test("builds and caches a validated failed-then-successful batch proof", async () => {
+  let calls = 0;
+  const worker = makeWorker({
+    proofBuilder: {
+      async getBatchProof(hashes) {
+        calls += 1;
+        assert.deepEqual(hashes, [TX_HASH, RETRY_TX_HASH]);
+        return { success: true, data: batchProofFixture() };
+      },
+    },
+  });
+
+  const first = await worker.getRetryBatchProof({
+    failedTransactionHash: TX_HASH,
+    successfulTransactionHash: RETRY_TX_HASH,
+  });
+  const second = await worker.getRetryBatchProof({
+    failedTransactionHash: TX_HASH,
+    successfulTransactionHash: RETRY_TX_HASH,
+  });
+  assert.equal(first, second);
+  assert.equal(calls, 1);
+  assert.equal(first.summary.failed.receiptStatus, 0);
+  assert.equal(first.summary.successful.receiptStatus, 1);
+  assert.equal(first.summary.failed.sender, CLAIMANT);
+  assert.equal(first.summary.successful.target, TARGET);
+  assert.equal(first.summary.blockSpan, 1);
+  assert.equal(first.summary.continuityRootCount, 2);
+
+  const contractProof = toContractBatchProof(first);
+  assert.deepEqual(contractProof.sourceBlocks, [25_000_000, 25_000_001]);
+  assert.equal(contractProof.encodedTransactions.length, 2);
+  assert.equal(contractProof.merkleProofs.length, 2);
+});
+
+test("accepts a Sepolia batch only when the worker is bound to Sepolia", async () => {
+  const worker = makeWorker({
+    sourceChainKey: SEPOLIA_CHAIN_KEY,
+    proofBuilder: {
+      async getBatchProof() {
+        return { success: true, data: batchProofFixture({ chainKey: SEPOLIA_CHAIN_KEY }) };
+      },
+    },
+  });
+  const proof = await worker.getRetryBatchProof({
+    failedTransactionHash: TX_HASH,
+    successfulTransactionHash: RETRY_TX_HASH,
+  });
+  assert.equal(proof.chainKey, SEPOLIA_CHAIN_KEY);
+  assert.equal(proof.summary.sourceChainKey, SEPOLIA_CHAIN_KEY);
+});
+
+test("rejects a batch from a different Attestcoin source chain", async () => {
+  const worker = makeWorker({
+    sourceChainKey: SEPOLIA_CHAIN_KEY,
+    proofAttempts: 1,
+    proofBuilder: {
+      async getBatchProof() {
+        return { success: true, data: batchProofFixture() };
+      },
+    },
+  });
+  await assert.rejects(
+    worker.getRetryBatchProof({ failedTransactionHash: TX_HASH, successfulTransactionHash: RETRY_TX_HASH }),
+    (error) => error instanceof WorkerError && error.code === "BATCH_PROOF_INVALID",
+  );
+});
+
+test("rejects duplicate hashes before requesting a batch proof", async () => {
+  const worker = makeWorker();
+  await assert.rejects(
+    worker.getRetryBatchProof({ failedTransactionHash: TX_HASH, successfulTransactionHash: TX_HASH }),
+    (error) => error instanceof WorkerError && error.code === "DUPLICATE_TRANSACTION_HASH",
+  );
+});
+
+test("rejects a batch whose supposed retry also failed", async () => {
+  const worker = makeWorker({
+    proofAttempts: 1,
+    proofBuilder: {
+      async getBatchProof() {
+        return { success: true, data: batchProofFixture({ retryStatus: 0 }) };
+      },
+    },
+  });
+  await assert.rejects(
+    worker.getRetryBatchProof({ failedTransactionHash: TX_HASH, successfulTransactionHash: RETRY_TX_HASH }),
+    (error) => error instanceof WorkerError && error.code === "BATCH_PROOF_INVALID",
+  );
+});
+
+test("rejects a retry batch when exact-call identity or order diverges", async (context) => {
+  const cases = [
+    { name: "sender", overrides: { retrySender: "0x2222222222222222222222222222222222222222" } },
+    { name: "target", overrides: { retryTarget: "0x2222222222222222222222222222222222222222" } },
+    { name: "selector", overrides: { retryData: "0x87654321" } },
+    { name: "calldata", overrides: { retryData: "0x1234567801" } },
+    { name: "value", overrides: { retryValue: 1n } },
+    { name: "nonce", overrides: { retryNonce: 10n } },
+    { name: "order", overrides: { retryBlock: 24_999_999 } },
+    { name: "same block", overrides: { retryBlock: 25_000_000, retryIndex: 4 } },
+  ];
+  for (const scenario of cases) {
+    await context.test(scenario.name, async () => {
+      const worker = makeWorker({
+        proofAttempts: 1,
+        proofBuilder: { async getBatchProof() { return { success: true, data: batchProofFixture(scenario.overrides) }; } },
+      });
+      await assert.rejects(
+        worker.getRetryBatchProof({ failedTransactionHash: TX_HASH, successfulTransactionHash: RETRY_TX_HASH }),
+        (error) => error instanceof WorkerError && error.code === "BATCH_PROOF_INVALID",
+      );
+    });
+  }
 });
 
 test("Ethereum lookup falls back to the next RPC", async () => {
@@ -197,8 +346,8 @@ function campaignFixture() {
     minimumAmount: 1_000_000_000n,
     startBlock: 25_049_872n,
     endBlock: 25_049_872n,
-    registrationDeadline: 1_786_730_502n,
-    withdrawalDeadline: 1_786_903_302n,
+    registrationDeadline: 4_102_444_800n,
+    withdrawalDeadline: 4_102_531_200n,
     fundedPool: 10_000_000_000_000_000_000n,
     claimantCount: 1n,
     sharePerClaim: 0n,
@@ -214,4 +363,76 @@ function proofFixture() {
     merkleProof: { root: `0x${"11".repeat(32)}`, siblings: [] },
     continuityProof: { lowerEndpointDigest: `0x${"22".repeat(32)}`, roots: [] },
   };
+}
+
+function batchProofFixture({
+  chainKey = 3,
+  retryStatus = 1,
+  retrySender = CLAIMANT,
+  retryTarget = TARGET,
+  retryData = "0x12345678",
+  retryValue = 0n,
+  retryNonce = 9n,
+  retryBlock = 25_000_001,
+  retryIndex = 1,
+} = {}) {
+  const failureBlock = 25_000_000;
+  const failureEntry = {
+    txHash: TX_HASH,
+    txBytes: encodedTransactionFixture({ status: 0, nonce: 8n }),
+    merkleProof: { root: `0x${"55".repeat(32)}`, siblings: [] },
+  };
+  const retryEntry = {
+    txHash: RETRY_TX_HASH,
+    txBytes: encodedTransactionFixture({
+      status: retryStatus,
+      nonce: retryNonce,
+      sender: retrySender,
+      target: retryTarget,
+      data: retryData,
+      value: retryValue,
+    }),
+    merkleProof: { root: `0x${"66".repeat(32)}`, siblings: [] },
+  };
+  const merkleProofs = retryBlock === failureBlock
+    ? new Map([[failureBlock, new Map([[3, failureEntry], [retryIndex, retryEntry]])]])
+    : new Map([
+      [failureBlock, new Map([[3, failureEntry]])],
+      [retryBlock, new Map([[retryIndex, retryEntry]])],
+    ]);
+  return {
+    chainKey,
+    fromHeader: Math.min(failureBlock, retryBlock),
+    toHeader: Math.max(failureBlock, retryBlock),
+    continuityProof: {
+      lowerEndpointDigest: `0x${"22".repeat(32)}`,
+      roots: [`0x${"33".repeat(32)}`, `0x${"44".repeat(32)}`],
+    },
+    merkleProofs,
+    cached: false,
+    generatedAt: new Date("2026-08-20T00:00:00Z"),
+  };
+}
+
+function encodedTransactionFixture({
+  status,
+  nonce,
+  sender = CLAIMANT,
+  target = TARGET,
+  data = "0x12345678",
+  value = 0n,
+}) {
+  const common = abiCoder.encode(
+    ["uint64", "uint64", "address", "bool", "address", "uint256", "bytes"],
+    [nonce, 100_000n, sender, false, target, value, data],
+  );
+  const typeSpecific = abiCoder.encode(
+    ["uint64", "uint128", "uint128", "tuple(address account,bytes32[] storageKeys)[]", "uint8", "bytes32", "bytes32"],
+    [1n, 1n, 2n, [], 0, `0x${"77".repeat(32)}`, `0x${"88".repeat(32)}`],
+  );
+  const receipt = abiCoder.encode(
+    ["uint8", "uint64", "tuple(address address_,bytes32[] topics,bytes data)[]", "bytes"],
+    [status, 50_000n, [], "0x"],
+  );
+  return abiCoder.encode(["uint8", "bytes[]"], [2, [common, typeSpecific, receipt]]);
 }
