@@ -87,6 +87,7 @@ async function main() {
   if (![
     "source-infra-status",
     "infrastructure-status",
+    "recover-release",
     "deploy-infra",
     "prepare-credit",
     "execute-source",
@@ -94,7 +95,7 @@ async function main() {
     "prove-release",
   ].includes(mode)) {
     throw new Error(
-      "usage: node scripts/retrycredit-spike-runner.mjs <source-infra-status|infrastructure-status|deploy-infra|prepare-credit|execute-source|attestation-status|prove-release> [state.json] [label]",
+      "usage: node scripts/retrycredit-spike-runner.mjs <source-infra-status|infrastructure-status|recover-release|deploy-infra|prepare-credit|execute-source|attestation-status|prove-release> [state.json] [label]",
     );
   }
   const ccProvider = new JsonRpcProvider(CC_RPC, CC_CHAIN_ID, { staticNetwork: true });
@@ -131,6 +132,25 @@ async function main() {
       truthBoundary: state.truthBoundary,
       ready: true,
     });
+    return;
+  }
+  if (mode === "recover-release") {
+    const state = await loadState(statePath);
+    validateInfrastructureState(state, EXPECTED_OPERATOR);
+    await authenticateInfrastructure(state, ccProvider, sepoliaProvider);
+    requireMutationOutputPaths();
+    const result = await recoverRelease({
+      state,
+      releaseTransactionHash: label,
+      ccProvider,
+    });
+    await persistState(result);
+    await journal("service-credit-release-recovered", {
+      transactionHash: result.releaseEvidence.releaseTransaction,
+      blockNumber: result.releaseEvidence.releaseBlock,
+      serviceCreditNumber: result.credit.serviceCreditNumber,
+    });
+    output(result);
     return;
   }
   if (mode === "attestation-status") {
@@ -623,14 +643,15 @@ async function proveRelease({ state, ccProvider, sepoliaProvider, ccRelayer, ccO
   }
   const credit = await pool.getServiceCredit(state.credit.serviceCreditNumber);
   if (!credit.released || credit.refunded) throw new Error("service credit did not reach the released state");
-  const decodedRelease = pool.interface.decodeFunctionData("releaseCredit", prepared.transaction.data);
   let replayRejection = "";
   try {
-    await pool.releaseCredit.staticCall(
-      state.credit.serviceCreditNumber,
-      decodedRelease.proof,
-      { from: ccRelayer.address, gasLimit: 8_000_000n },
-    );
+    await ccProvider.call({
+      from: ccRelayer.address,
+      to: prepared.transaction.to,
+      data: prepared.transaction.data,
+      gasLimit: 8_000_000n,
+      value: 0,
+    });
     throw new Error("released service credit unexpectedly replayed");
   } catch (error) {
     replayRejection = parseContractError(pool, error);
@@ -657,6 +678,140 @@ async function proveRelease({ state, ccProvider, sepoliaProvider, ccRelayer, ccO
     transactions: {
       ...state.transactions,
       creditRelease: releaseReceipt.hash,
+    },
+  };
+}
+
+async function recoverRelease({ state, releaseTransactionHash, ccProvider }) {
+  requireStage(state, "source-failure-and-settlement-complete");
+  if (!isHexString(releaseTransactionHash, 32)) throw new Error("recover-release requires the exact release transaction hash");
+  const poolArtifact = await readArtifact(artifacts.pool);
+  const pool = new Contract(state.contracts.pool, poolArtifact.abi, ccProvider);
+  const id = BigInt(state.credit.serviceCreditNumber);
+  const [receipt, transaction, credit, rule] = await Promise.all([
+    ccProvider.getTransactionReceipt(releaseTransactionHash),
+    ccProvider.getTransaction(releaseTransactionHash),
+    pool.getServiceCredit(id),
+    pool.getRule(id),
+  ]);
+  if (
+    !receipt
+    || !transaction
+    || Number(receipt.status) !== 1
+    || getAddress(transaction.from) !== getAddress(state.relayer)
+    || getAddress(transaction.to) !== getAddress(state.contracts.pool)
+    || BigInt(transaction.value) !== 0n
+  ) {
+    throw new Error("release transaction does not match the bounded relayer and pool");
+  }
+  const decoded = pool.interface.decodeFunctionData("releaseCredit", transaction.data);
+  if (BigInt(decoded.serviceCreditNumber) !== id) throw new Error("release transaction used a different service credit");
+  assertResolvedCreditMatchesState(credit, rule, state);
+
+  const releaseEvents = [];
+  for (const log of receipt.logs ?? []) {
+    if (getAddress(log.address) !== getAddress(state.contracts.pool)) continue;
+    try {
+      const parsed = pool.interface.parseLog(log);
+      if (parsed?.name === "CreditReleased") releaseEvents.push(parsed.args);
+    } catch {
+      // Ignore logs from the native verifier or other contracts.
+    }
+  }
+  if (releaseEvents.length !== 1) throw new Error("release receipt did not emit exactly one CreditReleased event");
+  const event = releaseEvents[0];
+  const failureQueryId = requireNonzeroBytes32(event.failureQueryId, "failure query ID");
+  const successQueryId = requireNonzeroBytes32(event.successQueryId, "success query ID");
+  const pairId = requireNonzeroBytes32(event.pairId, "pair ID");
+  if (
+    BigInt(event.serviceCreditNumber) !== id
+    || String(event.policyId).toLowerCase() !== String(state.credit.policyId).toLowerCase()
+    || getAddress(event.beneficiary) !== getAddress(state.operator)
+    || BigInt(event.creditAmount) !== CREDIT_AMOUNT
+    || getAddress(event.prover) !== getAddress(state.relayer)
+    || failureQueryId === successQueryId
+  ) {
+    throw new Error("CreditReleased event does not match the pre-funded service credit");
+  }
+  const actionKey = keccak256(abiCoder.encode(
+    ["uint64", "uint64", "address", "address", "bytes32"],
+    [SEPOLIA_CHAIN_KEY, SEPOLIA_CHAIN_ID, state.contracts.checkout, state.operator, state.credit.actionId],
+  ));
+  const [
+    failureConsumed,
+    successConsumed,
+    pairConsumed,
+    actionConsumed,
+    beneficiaryBefore,
+    beneficiaryAfter,
+    poolBefore,
+    poolAfter,
+    releaseBlock,
+  ] = await Promise.all([
+    pool.consumedQueries(failureQueryId),
+    pool.consumedQueries(successQueryId),
+    pool.consumedPairs(pairId),
+    pool.consumedActions(actionKey),
+    ccProvider.getBalance(state.operator, receipt.blockNumber - 1),
+    ccProvider.getBalance(state.operator, receipt.blockNumber),
+    ccProvider.getBalance(state.contracts.pool, receipt.blockNumber - 1),
+    ccProvider.getBalance(state.contracts.pool, receipt.blockNumber),
+    ccProvider.getBlock(receipt.blockNumber),
+  ]);
+  if (!failureConsumed || !successConsumed || !pairConsumed || !actionConsumed) {
+    throw new Error("release replay keys were not all consumed");
+  }
+  if (
+    BigInt(beneficiaryAfter) - BigInt(beneficiaryBefore) !== CREDIT_AMOUNT
+    || BigInt(poolBefore) - BigInt(poolAfter) !== CREDIT_AMOUNT
+  ) {
+    throw new Error("historical balances do not prove the exact service-credit transfer");
+  }
+  let replayRejection = "";
+  try {
+    await ccProvider.call({
+      from: state.relayer,
+      to: state.contracts.pool,
+      data: transaction.data,
+      gasLimit: 8_000_000n,
+      value: 0,
+    });
+    throw new Error("released service credit unexpectedly replayed");
+  } catch (error) {
+    replayRejection = parseContractError(pool, error);
+    if (replayRejection !== "AlreadyResolved") {
+      throw new Error(`expected AlreadyResolved on recovered replay, received ${replayRejection}`);
+    }
+  }
+  if (!releaseBlock) throw new Error("release block is unavailable");
+  const releasedAt = new Date(Number(releaseBlock.timestamp) * 1_000).toISOString();
+  const startedAtMs = Date.parse(state.sourceEvidence.startedAt);
+  if (!Number.isFinite(startedAtMs)) throw new Error("source journey start time is invalid");
+  const sourceToCreditSeconds = Number(releaseBlock.timestamp) - Math.floor(startedAtMs / 1_000);
+  return {
+    ...state,
+    stage: "credit-released",
+    updatedAt: new Date().toISOString(),
+    releaseEvidence: {
+      recoveredFromReceipt: true,
+      releasedAt,
+      releaseBlock: receipt.blockNumber,
+      sourceToCreditSeconds,
+      withinTwelveMinutes: sourceToCreditSeconds <= 12 * 60,
+      releaseTransaction: receipt.hash,
+      creditAmount: CREDIT_AMOUNT.toString(),
+      beneficiaryBalanceDelta: (BigInt(beneficiaryAfter) - BigInt(beneficiaryBefore)).toString(),
+      poolBalanceDelta: (BigInt(poolBefore) - BigInt(poolAfter)).toString(),
+      relayer: getAddress(state.relayer),
+      failureQueryId,
+      successQueryId,
+      pairId,
+      actionKey,
+      replayRejection,
+    },
+    transactions: {
+      ...state.transactions,
+      creditRelease: receipt.hash,
     },
   };
 }
@@ -1061,6 +1216,23 @@ async function authenticateActiveCredit(state, ccProvider) {
   assertRuleMatchesState(rule, state);
 }
 
+function assertResolvedCreditMatchesState(credit, rule, state) {
+  if (
+    getAddress(credit.sponsor) !== getAddress(state.operator)
+    || getAddress(state.credit.sponsor) !== getAddress(state.operator)
+    || BigInt(credit.creditAmount) !== BigInt(state.credit.creditAmount)
+    || BigInt(credit.creditAmount) !== CREDIT_AMOUNT
+    || Number(credit.refundAfter) !== Number(state.credit.refundAfter)
+    || Number(credit.creationBlock) !== Number(state.credit.creationBlock)
+    || String(credit.termsHash).toLowerCase() !== String(state.credit.termsHash).toLowerCase()
+    || !credit.released
+    || credit.refunded
+  ) {
+    throw new Error("resolved onchain service credit does not match the private source state");
+  }
+  assertRuleMatchesState(rule, state);
+}
+
 function parseServiceCreditDraft(pool, receipt, terms, refundAfter, expectedSponsor) {
   const matches = [];
   for (const log of receipt.logs ?? []) {
@@ -1245,6 +1417,13 @@ function requireNonzeroAddress(value, label) {
   const address = getAddress(value);
   if (address === ZeroAddress) throw new Error(`${label} must be nonzero`);
   return address;
+}
+
+function requireNonzeroBytes32(value, label) {
+  if (!isHexString(value, 32) || String(value).toLowerCase() === ZeroHash) {
+    throw new Error(`${label} must be a nonzero bytes32 value`);
+  }
+  return String(value).toLowerCase();
 }
 
 function requireStage(state, expected) {
