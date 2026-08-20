@@ -25,6 +25,13 @@ interface INativeQueryVerifier {
         ContinuityProof calldata continuityProof
     ) external returns (bool);
 
+    function verifyAndEmit(
+        uint64 chainKey,
+        uint64[] calldata heights,
+        bytes[] calldata encodedTransactions,
+        MerkleProof[] calldata merkleProofs,
+        ContinuityProof calldata sharedContinuityProof
+    ) external returns (bool);
+
     function calculateTxIndex(MerkleProof calldata merkleProof) external view returns (uint64);
 }
-

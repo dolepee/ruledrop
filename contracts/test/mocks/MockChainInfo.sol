@@ -19,6 +19,12 @@ contract MockChainInfo is IChainInfo {
         latest.exists = exists;
     }
 
+    function setLatestAttestation(uint64 height, bool isAttestation, bool exists) external {
+        latest.height = height;
+        latest.isAttestation = isAttestation;
+        latest.exists = exists;
+    }
+
     function setSource(uint64 chainKey, uint64 chainId, uint8 chainEncoding, bool exists) external {
         source = ChainInfoResult({
             info: ChainInfo({
