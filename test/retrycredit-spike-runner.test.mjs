@@ -4,7 +4,9 @@ import { AbiCoder, Interface, ZeroHash, keccak256, parseEther } from "ethers";
 import {
   assertNetwork,
   assertRuleMatchesTerms,
+  bindLibrarySelfAddress,
   getMutationOutputPaths,
+  linkArtifactBytecode,
   parseServiceCreditDraft,
   validateIncludedSourceReceipts,
   validateInfrastructureState,
@@ -18,6 +20,7 @@ const merchant = "0x9fEAcC0d3BC179B6022B4aAf96F7a8217F422642";
 const addresses = {
   testSettlementToken: "0x2222222222222222222222222222222222222222",
   checkout: "0x3333333333333333333333333333333333333333",
+  evmV1Decoder: "0x7777777777777777777777777777777777777777",
   predicate: "0x4444444444444444444444444444444444444444",
   verifier: "0x5555555555555555555555555555555555555555",
   pool: "0x6666666666666666666666666666666666666666",
@@ -44,6 +47,7 @@ function infrastructureState() {
       tokenMint: transactionHash("2"),
       checkoutDeployment: transactionHash("3"),
       tokenApproval: transactionHash("4"),
+      decoderDeployment: transactionHash("8"),
       predicateDeployment: transactionHash("5"),
       verifierDeployment: transactionHash("6"),
       poolDeployment: transactionHash("7"),
@@ -108,6 +112,33 @@ test("network check uses raw eth_chainId instead of static provider metadata", a
   await assertNetwork(provider, 11155111, "Sepolia");
   assert.equal(method, "eth_chainId");
   await assert.rejects(() => assertNetwork(provider, 1, "Ethereum"), /returned chain 11155111/);
+});
+
+test("artifact linker fills every declared external-library placeholder", () => {
+  const artifact = {
+    bytecode: {
+      object: `0x6000${"_".repeat(40)}6000`,
+      linkReferences: {
+        "contracts/EvmV1Decoder.sol": {
+          EvmV1Decoder: [{ start: 2, length: 20 }],
+        },
+      },
+    },
+  };
+  assert.equal(
+    linkArtifactBytecode(artifact, { EvmV1Decoder: addresses.evmV1Decoder }),
+    `0x6000${addresses.evmV1Decoder.slice(2)}6000`,
+  );
+  assert.throws(() => linkArtifactBytecode(artifact, {}), /missing deployed library/);
+});
+
+test("library runtime binding replaces only Solidity's self-address guard", () => {
+  const compiled = `0x73${"0".repeat(40)}30146080`;
+  assert.equal(
+    bindLibrarySelfAddress(compiled, addresses.evmV1Decoder),
+    `0x73${addresses.evmV1Decoder.slice(2)}30146080`,
+  );
+  assert.throws(() => bindLibrarySelfAddress("0x60006000", addresses.evmV1Decoder), /self-address guard/);
 });
 
 test("draft and activation parsers require one exact Pool event", () => {

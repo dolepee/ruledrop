@@ -75,6 +75,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const artifacts = {
   token: "out/RetryCredit.t.sol/MockSettlementToken.json",
   checkout: "out/RetryCreditCheckout.sol/RetryCreditCheckout.json",
+  decoder: "out/EvmV1Decoder.sol/EvmV1Decoder.json",
   predicate: "out/RetryCreditPredicateV2.sol/RetryCreditPredicateV2.json",
   verifier: "out/AttestcoinRetryCreditVerifier.sol/AttestcoinRetryCreditVerifier.json",
   pool: "out/RetryCreditPool.sol/RetryCreditPool.json",
@@ -82,9 +83,16 @@ const artifacts = {
 
 async function main() {
   const [mode, statePath, label] = process.argv.slice(2);
-  if (!["deploy-infra", "prepare-credit", "execute-source", "attestation-status", "prove-release"].includes(mode)) {
+  if (![
+    "source-infra-status",
+    "deploy-infra",
+    "prepare-credit",
+    "execute-source",
+    "attestation-status",
+    "prove-release",
+  ].includes(mode)) {
     throw new Error(
-      "usage: node scripts/retrycredit-spike-runner.mjs <deploy-infra|prepare-credit|execute-source|attestation-status|prove-release> [state.json] [label]",
+      "usage: node scripts/retrycredit-spike-runner.mjs <source-infra-status|deploy-infra|prepare-credit|execute-source|attestation-status|prove-release> [state.json] [label]",
     );
   }
   const ccProvider = new JsonRpcProvider(CC_RPC, CC_CHAIN_ID, { staticNetwork: true });
@@ -93,6 +101,20 @@ async function main() {
     assertNetwork(ccProvider, CC_CHAIN_ID, "Creditcoin CC3"),
     assertNetwork(sepoliaProvider, SEPOLIA_CHAIN_ID, "Sepolia"),
   ]);
+  if (mode === "source-infra-status") {
+    const sourceState = await loadSourceInfrastructureState(statePath);
+    await authenticateSourceInfrastructure(sourceState, sepoliaProvider, EXPECTED_OPERATOR);
+    output({
+      schemaVersion: sourceState.schemaVersion,
+      stage: "source-infrastructure-authenticated",
+      checkedAt: new Date().toISOString(),
+      operator: sourceState.operator,
+      contracts: sourceState.contracts,
+      truthBoundary: sourceState.truthBoundary,
+      ready: true,
+    });
+    return;
+  }
   if (mode === "attestation-status") {
     const state = await loadState(statePath);
     validateInfrastructureState(state, EXPECTED_OPERATOR);
@@ -112,7 +134,15 @@ async function main() {
   requireMutationOutputPaths();
 
   if (mode === "deploy-infra") {
-    const result = await deployInfrastructure({ ccProvider, sepoliaProvider, ccOperator, sepoliaOperator, ccRelayer });
+    const sourceState = statePath ? await loadSourceInfrastructureState(statePath) : null;
+    const result = await deployInfrastructure({
+      ccProvider,
+      sepoliaProvider,
+      ccOperator,
+      sepoliaOperator,
+      ccRelayer,
+      sourceState,
+    });
     await persistState(result);
     output(result);
     return;
@@ -131,7 +161,14 @@ async function main() {
   output(result);
 }
 
-async function deployInfrastructure({ ccProvider, sepoliaProvider, ccOperator, sepoliaOperator, ccRelayer }) {
+async function deployInfrastructure({
+  ccProvider,
+  sepoliaProvider,
+  ccOperator,
+  sepoliaOperator,
+  ccRelayer,
+  sourceState,
+}) {
   const [ccBalance, sepoliaBalance] = await Promise.all([
     ccProvider.getBalance(ccOperator.address),
     sepoliaProvider.getBalance(sepoliaOperator.address),
@@ -139,25 +176,55 @@ async function deployInfrastructure({ ccProvider, sepoliaProvider, ccOperator, s
   if (ccBalance < MINIMUM_CC_BALANCE) throw new Error("insufficient CC3 balance for the bounded spike");
   if (sepoliaBalance < MINIMUM_SEPOLIA_BALANCE) throw new Error("insufficient Sepolia ETH for the bounded spike");
 
-  status("deploying disclosed test settlement token on Sepolia");
-  const token = await deploy("test settlement token", artifacts.token, sepoliaOperator, []);
   const tokenArtifact = await readArtifact(artifacts.token);
-  const tokenContract = new Contract(token.address, tokenArtifact.abi, sepoliaOperator);
-  const mintReceipt = await sendAndRequireSuccess(tokenContract.mint(sepoliaOperator.address, TEST_TOKEN_MINT));
-  await journal("token-minted", { transactionHash: mintReceipt.hash, blockNumber: mintReceipt.blockNumber });
+  let source;
+  if (sourceState) {
+    await authenticateSourceInfrastructure(sourceState, sepoliaProvider, ccOperator.address);
+    status("reusing the authenticated partial Sepolia source infrastructure");
+    source = sourceState;
+  } else {
+    status("deploying disclosed test settlement token on Sepolia");
+    const token = await deploy("test settlement token", artifacts.token, sepoliaOperator, []);
+    const tokenContract = new Contract(token.address, tokenArtifact.abi, sepoliaOperator);
+    const mintReceipt = await sendAndRequireSuccess(tokenContract.mint(sepoliaOperator.address, TEST_TOKEN_MINT));
+    await journal("token-minted", { transactionHash: mintReceipt.hash, blockNumber: mintReceipt.blockNumber });
 
-  status("deploying signed RetryCredit checkout on Sepolia");
-  const checkout = await deploy(
-    "RetryCredit checkout",
-    artifacts.checkout,
-    sepoliaOperator,
-    [sepoliaOperator.address, token.address],
-  );
-  const approveReceipt = await sendAndRequireSuccess(tokenContract.approve(checkout.address, TEST_TOKEN_MINT));
-  await journal("token-approved", { transactionHash: approveReceipt.hash, blockNumber: approveReceipt.blockNumber });
+    status("deploying signed RetryCredit checkout on Sepolia");
+    const checkout = await deploy(
+      "RetryCredit checkout",
+      artifacts.checkout,
+      sepoliaOperator,
+      [sepoliaOperator.address, token.address],
+    );
+    const approveReceipt = await sendAndRequireSuccess(tokenContract.approve(checkout.address, TEST_TOKEN_MINT));
+    await journal("token-approved", { transactionHash: approveReceipt.hash, blockNumber: approveReceipt.blockNumber });
+    source = {
+      schemaVersion: "retrycredit.source-infra.v1",
+      stage: "source-infrastructure-deployed",
+      createdAt: new Date().toISOString(),
+      operator: ccOperator.address,
+      merchant: MERCHANT,
+      networks: { source: { chainId: SEPOLIA_CHAIN_ID, name: "Sepolia" } },
+      contracts: { testSettlementToken: token.address, checkout: checkout.address },
+      transactions: {
+        tokenDeployment: token.transactionHash,
+        tokenMint: mintReceipt.hash,
+        checkoutDeployment: checkout.transactionHash,
+        tokenApproval: approveReceipt.hash,
+      },
+      truthBoundary: "The source asset is a disclosed disposable test token, not canonical USDC.",
+    };
+  }
 
   status("deploying RetryCredit predicate, Attestcoin verifier, and funded pool on CC3");
-  const predicate = await deploy("RetryCredit predicate", artifacts.predicate, ccOperator, []);
+  const decoder = await deploy("EvmV1Decoder library", artifacts.decoder, ccOperator, []);
+  const predicate = await deploy(
+    "RetryCredit predicate",
+    artifacts.predicate,
+    ccOperator,
+    [],
+    { EvmV1Decoder: decoder.address },
+  );
   const verifier = await deploy(
     "Attestcoin RetryCredit verifier",
     artifacts.verifier,
@@ -184,7 +251,7 @@ async function deployInfrastructure({ ccProvider, sepoliaProvider, ccOperator, s
   const result = {
     schemaVersion: "retrycredit.spike-state.v1",
     stage: "infrastructure-deployed",
-    createdAt: new Date().toISOString(),
+    createdAt: source.createdAt,
     operator: ccOperator.address,
     relayer: ccRelayer.address,
     merchant: MERCHANT,
@@ -193,17 +260,16 @@ async function deployInfrastructure({ ccProvider, sepoliaProvider, ccOperator, s
       source: { chainId: SEPOLIA_CHAIN_ID, name: "Sepolia" },
     },
     contracts: {
-      testSettlementToken: token.address,
-      checkout: checkout.address,
+      testSettlementToken: source.contracts.testSettlementToken,
+      checkout: source.contracts.checkout,
+      evmV1Decoder: decoder.address,
       predicate: predicate.address,
       verifier: verifier.address,
       pool: pool.address,
     },
     transactions: {
-      tokenDeployment: token.transactionHash,
-      tokenMint: mintReceipt.hash,
-      checkoutDeployment: checkout.transactionHash,
-      tokenApproval: approveReceipt.hash,
+      ...source.transactions,
+      decoderDeployment: decoder.transactionHash,
       predicateDeployment: predicate.transactionHash,
       verifierDeployment: verifier.transactionHash,
       poolDeployment: pool.transactionHash,
@@ -593,9 +659,10 @@ function attemptFor(state, quoteVersion, payload) {
   };
 }
 
-async function deploy(label, artifactPath, signer, args) {
+async function deploy(label, artifactPath, signer, args, libraries = {}) {
   const artifact = await readArtifact(artifactPath);
-  const factory = new ContractFactory(artifact.abi, artifact.bytecode.object, signer);
+  const bytecode = linkArtifactBytecode(artifact, libraries);
+  const factory = new ContractFactory(artifact.abi, bytecode, signer);
   const contract = await factory.deploy(...args);
   const transaction = contract.deploymentTransaction();
   if (!transaction) throw new Error(`${label} deployment did not produce a transaction`);
@@ -648,10 +715,73 @@ async function assertNetwork(provider, expectedChainId, label) {
 
 async function readArtifact(relativePath) {
   const parsed = JSON.parse(await readFile(path.join(repoRoot, relativePath), "utf8"));
-  if (!Array.isArray(parsed.abi) || !isHexString(parsed.bytecode?.object) || parsed.bytecode.object === "0x") {
+  const bytecode = parsed.bytecode?.object;
+  const linkReferences = parsed.bytecode?.linkReferences ?? {};
+  const hasLinkReferences = Object.values(linkReferences).some(
+    (libraries) => Object.values(libraries).some((references) => references.length > 0),
+  );
+  if (
+    !Array.isArray(parsed.abi)
+    || typeof bytecode !== "string"
+    || !bytecode.startsWith("0x")
+    || bytecode === "0x"
+    || (!hasLinkReferences && !isHexString(bytecode))
+  ) {
     throw new Error(`invalid compiled artifact ${relativePath}; run forge build first`);
   }
   return parsed;
+}
+
+function linkArtifactBytecode(artifact, libraries) {
+  return linkBytecodeObject(artifact.bytecode.object, artifact.bytecode.linkReferences ?? {}, libraries);
+}
+
+function linkBytecodeObject(bytecodeObject, references, libraries) {
+  if (typeof bytecodeObject !== "string" || !bytecodeObject.startsWith("0x") || bytecodeObject === "0x") {
+    throw new Error("compiled linked bytecode is invalid");
+  }
+  let bytecode = bytecodeObject;
+  for (const [sourceName, sourceLibraries] of Object.entries(references)) {
+    for (const [libraryName, positions] of Object.entries(sourceLibraries)) {
+      const configured = libraries[`${sourceName}:${libraryName}`] ?? libraries[libraryName];
+      if (!configured) throw new Error(`missing deployed library ${sourceName}:${libraryName}`);
+      const address = requireNonzeroAddress(configured, `library ${libraryName}`).slice(2).toLowerCase();
+      for (const position of positions) {
+        if (position.length !== 20) throw new Error(`unsupported ${libraryName} link-reference length`);
+        const start = 2 + Number(position.start) * 2;
+        const end = start + Number(position.length) * 2;
+        bytecode = `${bytecode.slice(0, start)}${address}${bytecode.slice(end)}`;
+      }
+    }
+  }
+  if (!isHexString(bytecode) || bytecode === "0x") throw new Error("linked deployment bytecode is still invalid");
+  return bytecode;
+}
+
+function bindLibrarySelfAddress(runtimeBytecode, address) {
+  if (!isHexString(runtimeBytecode) || runtimeBytecode === "0x") {
+    throw new Error("compiled library runtime bytecode is invalid");
+  }
+  if (!runtimeBytecode.toLowerCase().startsWith(`0x73${"0".repeat(40)}`)) {
+    throw new Error("compiled library runtime does not contain the expected self-address guard");
+  }
+  return `0x73${requireNonzeroAddress(address, "library self address").slice(2).toLowerCase()}${runtimeBytecode.slice(44)}`;
+}
+
+async function verifyLibraryRuntimeBytecode(provider, address, artifact) {
+  const expected = bindLibrarySelfAddress(artifact.deployedBytecode?.object, address);
+  const actual = await provider.getCode(address);
+  if (actual.toLowerCase() !== expected.toLowerCase()) throw new Error("deployed library runtime bytecode drifted");
+}
+
+async function verifyLinkedRuntimeBytecode(provider, address, artifact, libraries) {
+  const expected = linkBytecodeObject(
+    artifact.deployedBytecode?.object,
+    artifact.deployedBytecode?.linkReferences ?? {},
+    libraries,
+  );
+  const actual = await provider.getCode(address);
+  if (actual.toLowerCase() !== expected.toLowerCase()) throw new Error("deployed linked runtime bytecode drifted");
 }
 
 async function loadState(statePath) {
@@ -689,7 +819,7 @@ function validateInfrastructureState(state, operator, relayer) {
   ) {
     throw new Error("state network constants do not match the bounded spike");
   }
-  const expectedContractKeys = ["checkout", "pool", "predicate", "testSettlementToken", "verifier"];
+  const expectedContractKeys = ["checkout", "evmV1Decoder", "pool", "predicate", "testSettlementToken", "verifier"];
   const actualContractKeys = Object.keys(state.contracts ?? {}).sort();
   if (JSON.stringify(actualContractKeys) !== JSON.stringify(expectedContractKeys)) {
     throw new Error("state contract set is incomplete or unexpected");
@@ -701,6 +831,7 @@ function validateInfrastructureState(state, operator, relayer) {
     "tokenMint",
     "checkoutDeployment",
     "tokenApproval",
+    "decoderDeployment",
     "predicateDeployment",
     "verifierDeployment",
     "poolDeployment",
@@ -718,9 +849,10 @@ function validateInfrastructureState(state, operator, relayer) {
 
 async function authenticateInfrastructure(state, ccProvider, sepoliaProvider) {
   validateInfrastructureState(state, state.operator, state.relayer);
-  const [tokenArtifact, checkoutArtifact, predicateArtifact, verifierArtifact, poolArtifact] = await Promise.all([
+  const [tokenArtifact, checkoutArtifact, decoderArtifact, predicateArtifact, verifierArtifact, poolArtifact] = await Promise.all([
     readArtifact(artifacts.token),
     readArtifact(artifacts.checkout),
+    readArtifact(artifacts.decoder),
     readArtifact(artifacts.predicate),
     readArtifact(artifacts.verifier),
     readArtifact(artifacts.pool),
@@ -732,6 +864,7 @@ async function authenticateInfrastructure(state, ccProvider, sepoliaProvider) {
   const contractLocations = [
     [sepoliaProvider, state.contracts.testSettlementToken, state.transactions.tokenDeployment, "test settlement token"],
     [sepoliaProvider, state.contracts.checkout, state.transactions.checkoutDeployment, "checkout"],
+    [ccProvider, state.contracts.evmV1Decoder, state.transactions.decoderDeployment, "EvmV1Decoder library"],
     [ccProvider, state.contracts.predicate, state.transactions.predicateDeployment, "predicate"],
     [ccProvider, state.contracts.verifier, state.transactions.verifierDeployment, "verifier"],
     [ccProvider, state.contracts.pool, state.transactions.poolDeployment, "pool"],
@@ -749,6 +882,15 @@ async function authenticateInfrastructure(state, ccProvider, sepoliaProvider) {
     state.transactions.relayerFunding
       ? verifySuccessfulReceipt(ccProvider, state.transactions.relayerFunding, "relayer funding")
       : Promise.resolve(),
+  ]);
+  await Promise.all([
+    verifyLibraryRuntimeBytecode(ccProvider, state.contracts.evmV1Decoder, decoderArtifact),
+    verifyLinkedRuntimeBytecode(
+      ccProvider,
+      state.contracts.predicate,
+      predicateArtifact,
+      { EvmV1Decoder: state.contracts.evmV1Decoder },
+    ),
   ]);
   const [
     decimals,
@@ -807,6 +949,69 @@ async function authenticateInfrastructure(state, ccProvider, sepoliaProvider) {
     || getAddress(nativeVerifier) !== getAddress("0x0000000000000000000000000000000000000fD2")
   ) {
     throw new Error("Attestcoin verifier immutables do not match the native sponsor stack");
+  }
+}
+
+async function loadSourceInfrastructureState(statePath) {
+  if (!statePath) return null;
+  return JSON.parse(await readFile(path.resolve(statePath), "utf8"));
+}
+
+async function authenticateSourceInfrastructure(state, sepoliaProvider, expectedOperator) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) {
+    throw new Error("partial source infrastructure state must be an object");
+  }
+  if (
+    state.schemaVersion !== "retrycredit.source-infra.v1"
+    || state.stage !== "source-infrastructure-deployed"
+    || requireNonzeroAddress(state.operator, "source operator") !== getAddress(expectedOperator)
+    || requireNonzeroAddress(state.merchant, "source merchant") !== getAddress(MERCHANT)
+    || Number(state.networks?.source?.chainId) !== SEPOLIA_CHAIN_ID
+    || state.networks?.source?.name !== "Sepolia"
+    || state.truthBoundary !== "The source asset is a disclosed disposable test token, not canonical USDC."
+  ) {
+    throw new Error("partial source infrastructure state does not match the bounded spike");
+  }
+  const expectedContractKeys = ["checkout", "testSettlementToken"];
+  if (JSON.stringify(Object.keys(state.contracts ?? {}).sort()) !== JSON.stringify(expectedContractKeys)) {
+    throw new Error("partial source infrastructure contract set is incomplete or unexpected");
+  }
+  const tokenAddress = requireNonzeroAddress(state.contracts.testSettlementToken, "source test settlement token");
+  const checkoutAddress = requireNonzeroAddress(state.contracts.checkout, "source checkout");
+  if (tokenAddress === checkoutAddress) throw new Error("partial source infrastructure addresses must be distinct");
+  for (const key of ["tokenDeployment", "tokenMint", "checkoutDeployment", "tokenApproval"]) {
+    if (!isHexString(state.transactions?.[key], 32)) throw new Error(`partial source state is missing ${key}`);
+  }
+  const [tokenArtifact, checkoutArtifact] = await Promise.all([
+    readArtifact(artifacts.token),
+    readArtifact(artifacts.checkout),
+  ]);
+  const token = new Contract(tokenAddress, tokenArtifact.abi, sepoliaProvider);
+  const checkout = new Contract(checkoutAddress, checkoutArtifact.abi, sepoliaProvider);
+  await Promise.all([
+    verifyDeploymentReceipt(sepoliaProvider, state.transactions.tokenDeployment, tokenAddress, "partial test token"),
+    verifySuccessfulReceipt(sepoliaProvider, state.transactions.tokenMint, "partial test-token mint"),
+    verifyDeploymentReceipt(sepoliaProvider, state.transactions.checkoutDeployment, checkoutAddress, "partial checkout"),
+    verifySuccessfulReceipt(sepoliaProvider, state.transactions.tokenApproval, "partial test-token approval"),
+  ]);
+  const [tokenCode, checkoutCode, decimals, balance, allowance, attemptSigner, settlementAsset] = await Promise.all([
+    sepoliaProvider.getCode(tokenAddress),
+    sepoliaProvider.getCode(checkoutAddress),
+    token.decimals(),
+    token.balanceOf(expectedOperator),
+    token.allowance(expectedOperator, checkoutAddress),
+    checkout.attemptSigner(),
+    checkout.settlementAsset(),
+  ]);
+  if (tokenCode === "0x" || checkoutCode === "0x") throw new Error("partial source infrastructure bytecode is missing");
+  if (
+    Number(decimals) !== 18
+    || BigInt(balance) < SETTLED_VALUE
+    || BigInt(allowance) < SETTLED_VALUE
+    || getAddress(attemptSigner) !== getAddress(expectedOperator)
+    || getAddress(settlementAsset) !== tokenAddress
+  ) {
+    throw new Error("partial source infrastructure state failed live contract authentication");
   }
 }
 
@@ -1145,7 +1350,9 @@ if (isMain) {
 export {
   assertNetwork,
   assertRuleMatchesTerms,
+  bindLibrarySelfAddress,
   getMutationOutputPaths,
+  linkArtifactBytecode,
   parseServiceCreditDraft,
   validateIncludedSourceReceipts,
   validateInfrastructureState,
