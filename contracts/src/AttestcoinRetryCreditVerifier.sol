@@ -2,10 +2,10 @@
 pragma solidity ^0.8.23;
 
 import {INativeQueryVerifier} from "./interfaces/INativeQueryVerifier.sol";
-import {RetryCoverPredicateV1} from "./RetryCoverPredicateV1.sol";
+import {RetryCreditPredicateV2} from "./RetryCreditPredicateV2.sol";
 
-/// @notice Verifies a two-receipt recovery sequence through Attestcoin's native batch path.
-contract AttestcoinRetryVerifier {
+/// @notice Verifies an included failure and later successful retry with one Attestcoin batch proof.
+contract AttestcoinRetryCreditVerifier {
     address public constant NATIVE_VERIFIER = 0x0000000000000000000000000000000000000FD2;
 
     struct BatchProof {
@@ -17,7 +17,7 @@ contract AttestcoinRetryVerifier {
     }
 
     INativeQueryVerifier public immutable verifier;
-    RetryCoverPredicateV1 public immutable predicate;
+    RetryCreditPredicateV2 public immutable predicate;
     uint64 public immutable sourceChainKey;
     uint64 public immutable sourceChainId;
 
@@ -27,7 +27,7 @@ contract AttestcoinRetryVerifier {
     error ProofVerificationFailed();
 
     constructor(
-        RetryCoverPredicateV1 predicate_,
+        RetryCreditPredicateV2 predicate_,
         address verifierOverride,
         uint64 sourceChainKey_,
         uint64 sourceChainId_
@@ -41,21 +41,12 @@ contract AttestcoinRetryVerifier {
         sourceChainId = sourceChainId_;
     }
 
-    function verifyRetry(BatchProof calldata proof, RetryCoverPredicateV1.Rule calldata rule)
+    function verifyRelease(BatchProof calldata proof, RetryCreditPredicateV2.Rule calldata rule)
         external
         returns (address beneficiary, bytes32 failureQueryId, bytes32 successQueryId, bytes32 pairId)
     {
         if (proof.sourceBlocks.length != 2 || proof.encodedTransactions.length != 2 || proof.merkleProofs.length != 2) revert InvalidBatch();
-        // V1 only accepts a retry mined in a strictly later source block.
         if (proof.sourceBlocks[1] <= proof.sourceBlocks[0]) revert InvalidProofOrder();
-
-        beneficiary = predicate.validate(
-            proof.encodedTransactions[0],
-            proof.sourceBlocks[0],
-            proof.encodedTransactions[1],
-            proof.sourceBlocks[1],
-            rule
-        );
 
         INativeQueryVerifier.ContinuityProof memory sharedContinuityProof = INativeQueryVerifier.ContinuityProof({
             lowerEndpointDigest: proof.lowerEndpointDigest, roots: proof.continuityRoots
@@ -65,12 +56,20 @@ contract AttestcoinRetryVerifier {
         );
         if (!verified) revert ProofVerificationFailed();
 
+        beneficiary = predicate.validate(
+            proof.encodedTransactions[0],
+            proof.sourceBlocks[0],
+            proof.encodedTransactions[1],
+            proof.sourceBlocks[1],
+            sourceChainId,
+            rule
+        );
+
         uint64 failureIndex = verifier.calculateTxIndex(proof.merkleProofs[0]);
         uint64 successIndex = verifier.calculateTxIndex(proof.merkleProofs[1]);
-
         failureQueryId = _queryId(proof.sourceBlocks[0], failureIndex);
         successQueryId = _queryId(proof.sourceBlocks[1], successIndex);
-        pairId = keccak256(abi.encode(failureQueryId, successQueryId));
+        pairId = keccak256(abi.encode(rule.policyId, rule.actionId, failureQueryId, successQueryId));
     }
 
     function _queryId(uint64 sourceBlock, uint64 transactionIndex) private view returns (bytes32) {
