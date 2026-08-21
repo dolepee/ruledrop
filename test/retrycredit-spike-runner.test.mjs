@@ -7,6 +7,7 @@ import {
   bindLibrarySelfAddress,
   getMutationOutputPaths,
   linkArtifactBytecode,
+  parseCreditReleasedEvent,
   parseServiceCreditDraft,
   validateIncludedSourceReceipts,
   validateInfrastructureState,
@@ -139,6 +140,37 @@ test("library runtime binding replaces only Solidity's self-address guard", () =
     `0x73${addresses.evmV1Decoder.slice(2)}30146080`,
   );
   assert.throws(() => bindLibrarySelfAddress("0x60006000", addresses.evmV1Decoder), /self-address guard/);
+});
+
+test("release recovery accepts only one CreditReleased event from the configured pool", () => {
+  const iface = new Interface([
+    "event CreditReleased(uint256 indexed serviceCreditNumber,bytes32 indexed policyId,address indexed beneficiary,uint256 creditAmount,bytes32 failureQueryId,bytes32 successQueryId,bytes32 pairId,address prover)",
+  ]);
+  const encoded = iface.encodeEventLog(iface.getEvent("CreditReleased"), [
+    1,
+    transactionHash("9"),
+    operator,
+    parseEther("0.1"),
+    transactionHash("c"),
+    transactionHash("d"),
+    transactionHash("e"),
+    relayer,
+  ]);
+  const pool = { interface: iface };
+  const realLog = { address: addresses.pool, ...encoded };
+  const spoofedLog = { address: addresses.verifier, ...encoded };
+
+  const event = parseCreditReleasedEvent(pool, { logs: [spoofedLog, realLog] }, addresses.pool);
+  assert.equal(event.serviceCreditNumber, 1n);
+  assert.equal(event.prover, relayer);
+  assert.throws(
+    () => parseCreditReleasedEvent(pool, { logs: [spoofedLog] }, addresses.pool),
+    /exactly one CreditReleased/,
+  );
+  assert.throws(
+    () => parseCreditReleasedEvent(pool, { logs: [realLog, realLog] }, addresses.pool),
+    /exactly one CreditReleased/,
+  );
 });
 
 test("draft and activation parsers require one exact Pool event", () => {

@@ -708,18 +708,7 @@ async function recoverRelease({ state, releaseTransactionHash, ccProvider }) {
   if (BigInt(decoded.serviceCreditNumber) !== id) throw new Error("release transaction used a different service credit");
   assertResolvedCreditMatchesState(credit, rule, state);
 
-  const releaseEvents = [];
-  for (const log of receipt.logs ?? []) {
-    if (getAddress(log.address) !== getAddress(state.contracts.pool)) continue;
-    try {
-      const parsed = pool.interface.parseLog(log);
-      if (parsed?.name === "CreditReleased") releaseEvents.push(parsed.args);
-    } catch {
-      // Ignore logs from the native verifier or other contracts.
-    }
-  }
-  if (releaseEvents.length !== 1) throw new Error("release receipt did not emit exactly one CreditReleased event");
-  const event = releaseEvents[0];
+  const event = parseCreditReleasedEvent(pool, receipt, state.contracts.pool);
   const failureQueryId = requireNonzeroBytes32(event.failureQueryId, "failure query ID");
   const successQueryId = requireNonzeroBytes32(event.successQueryId, "success query ID");
   const pairId = requireNonzeroBytes32(event.pairId, "pair ID");
@@ -814,6 +803,21 @@ async function recoverRelease({ state, releaseTransactionHash, ccProvider }) {
       creditRelease: receipt.hash,
     },
   };
+}
+
+function parseCreditReleasedEvent(pool, receipt, expectedPool) {
+  const releaseEvents = [];
+  for (const log of receipt.logs ?? []) {
+    if (getAddress(log.address) !== getAddress(expectedPool)) continue;
+    try {
+      const parsed = pool.interface.parseLog(log);
+      if (parsed?.name === "CreditReleased") releaseEvents.push(parsed.args);
+    } catch {
+      // Ignore non-Pool logs that happen to be emitted by the same transaction.
+    }
+  }
+  if (releaseEvents.length !== 1) throw new Error("release receipt did not emit exactly one CreditReleased event");
+  return releaseEvents[0];
 }
 
 function attemptFor(state, quoteVersion, payload) {
@@ -1550,6 +1554,7 @@ export {
   bindLibrarySelfAddress,
   getMutationOutputPaths,
   linkArtifactBytecode,
+  parseCreditReleasedEvent,
   parseServiceCreditDraft,
   validateIncludedSourceReceipts,
   validateInfrastructureState,
