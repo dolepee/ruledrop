@@ -237,7 +237,7 @@ test("stored draft verification recomputes the exact funded terms hash", async (
   const ruleTuple = "tuple(address attemptSigner,address beneficiary,address target,address settlementAsset,address settlementRecipient,bytes32 policyId,bytes32 actionId,uint256 minimumSettledValue,uint64 startBlock,uint64 endBlock,uint32 maxBlockGap,uint64 minimumAttemptGasLimit,uint64 maxFailureGasUsed)";
   const terms = {
     attemptSigner: operator,
-    beneficiary: operator,
+    beneficiary: relayer,
     target: addresses.checkout,
     settlementAsset: addresses.testSettlementToken,
     settlementRecipient: merchant,
@@ -284,6 +284,7 @@ test("stored draft verification recomputes the exact funded terms hash", async (
     { creationBlock: 500, termsHash },
     refundAfter,
     500,
+    operator,
   ));
   await assert.rejects(() => verifyStoredDraft(
     pool,
@@ -292,6 +293,16 @@ test("stored draft verification recomputes the exact funded terms hash", async (
     { creationBlock: 500, termsHash },
     refundAfter,
     500,
+    operator,
+  ), /stored service credit draft/);
+  await assert.rejects(() => verifyStoredDraft(
+    pool,
+    7,
+    terms,
+    { creationBlock: 500, termsHash },
+    refundAfter,
+    500,
+    merchant,
   ), /stored service credit draft/);
 });
 

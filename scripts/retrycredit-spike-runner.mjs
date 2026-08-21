@@ -373,7 +373,15 @@ async function prepareCredit({ state, label, ccProvider, sepoliaProvider, ccOper
   }));
   const draft = parseServiceCreditDraft(pool, creationReceipt, terms, refundAfter, state.operator);
   const serviceCreditNumber = draft.serviceCreditNumber;
-  await verifyStoredDraft(pool, serviceCreditNumber, terms, draft, refundAfter, creationReceipt.blockNumber);
+  await verifyStoredDraft(
+    pool,
+    serviceCreditNumber,
+    terms,
+    draft,
+    refundAfter,
+    creationReceipt.blockNumber,
+    state.operator,
+  );
   await journal("service-credit-created", {
     transactionHash: creationReceipt.hash,
     blockNumber: creationReceipt.blockNumber,
@@ -1266,7 +1274,15 @@ function parseServiceCreditDraft(pool, receipt, terms, refundAfter, expectedSpon
   };
 }
 
-async function verifyStoredDraft(pool, serviceCreditNumber, terms, draft, refundAfter, creationBlock) {
+async function verifyStoredDraft(
+  pool,
+  serviceCreditNumber,
+  terms,
+  draft,
+  refundAfter,
+  creationBlock,
+  expectedSponsor,
+) {
   const [credit, rule, sourceChainKey, sourceChainId] = await Promise.all([
     pool.getServiceCredit(serviceCreditNumber),
     pool.getRule(serviceCreditNumber),
@@ -1278,7 +1294,7 @@ async function verifyStoredDraft(pool, serviceCreditNumber, terms, draft, refund
     [sourceChainKey, sourceChainId, terms, refundAfter, CREDIT_AMOUNT],
   ));
   if (
-    getAddress(credit.sponsor) !== getAddress(terms.beneficiary)
+    getAddress(credit.sponsor) !== getAddress(expectedSponsor)
     || BigInt(credit.creditAmount) !== CREDIT_AMOUNT
     || Number(credit.refundAfter) !== Number(refundAfter)
     || Number(credit.creationBlock) !== Number(creationBlock)
