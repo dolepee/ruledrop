@@ -3,6 +3,7 @@ import {
   Contract,
   Interface,
   JsonRpcProvider,
+  Signature,
   formatEther,
   formatUnits,
   getAddress,
@@ -21,6 +22,15 @@ export const CANONICAL_USDC = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48";
 export const TRANSFER_SELECTOR = "0xa9059cbb";
 export const CLAIM_TEMPLATES = Object.freeze({ TRANSFER: 0, INTERACTION: 1 });
 export const PAYOUT_POLICIES = Object.freeze({ EQUAL: 0, SOURCE_AMOUNT_WEIGHTED: 1 });
+export const RETRY_CREDIT_UNISWAP_SEPOLIA = Object.freeze({
+  sourceChainKey: SEPOLIA_CHAIN_KEY,
+  sourceChainId: 11_155_111,
+  router: "0x7DfD4F31be6814D2906BDE155c3e1B146EAc1468",
+  weth: "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
+  usdc: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+  pool: "0x3289680dD4d6C10bb19b899729cda5eEF58AEfF1",
+  fee: 500,
+});
 
 const DEFAULT_PROOF_BUILDER = "https://prover.cc3-testnet.creditcoin.network";
 const DEFAULT_CREDITCOIN_RPC = "https://rpc.cc3-testnet.creditcoin.network";
@@ -54,6 +64,30 @@ const RETRY_CREDIT_SETTLED_EVENT = id(
   "CheckoutSettled(bytes32,bytes32,address,address,address,uint256,bytes32,uint64)",
 );
 const ERC20_TRANSFER_EVENT = id("Transfer(address,address,uint256)");
+const UNISWAP_V3_SWAP_EVENT = id("Swap(address,address,int256,int256,uint160,uint128,int24)");
+const UNIVERSAL_ROUTER_ABI = [
+  "function executeSigned(bytes commands,bytes[] inputs,bytes32 intent,bytes32 data,bool verifySender,bytes32 nonce,bytes signature,uint256 deadline)",
+];
+const universalRouterInterface = new Interface(UNIVERSAL_ROUTER_ABI);
+const UNIVERSAL_ROUTER_EXECUTE_SIGNED_SELECTOR = universalRouterInterface.getFunction("executeSigned").selector;
+const UNIVERSAL_ROUTER_COMMANDS = "0x0b00";
+const UNIVERSAL_ROUTER_WRAP_ETH_RECIPIENT = "0x0000000000000000000000000000000000000002";
+const UNIVERSAL_ROUTER_MSG_SENDER_RECIPIENT = "0x0000000000000000000000000000000000000001";
+const UNIVERSAL_ROUTER_DOMAIN = Object.freeze({ name: "UniversalRouter", version: "2" });
+const UNIVERSAL_ROUTER_TYPES = Object.freeze({
+  ExecuteSigned: [
+    { name: "commands", type: "bytes" },
+    { name: "inputs", type: "bytes[]" },
+    { name: "intent", type: "bytes32" },
+    { name: "data", type: "bytes32" },
+    { name: "sender", type: "address" },
+    { name: "nonce", type: "bytes32" },
+    { name: "deadline", type: "uint256" },
+  ],
+});
+const MAX_BYTES32 = `0x${"ff".repeat(32)}`;
+const MAX_UINT64 = (1n << 64n) - 1n;
+const UNISWAP_RETRY_INTENT_LABEL = "RETRYCREDIT_UNISWAP_V1";
 const RETRY_CREDIT_DOMAIN = Object.freeze({ name: "RetryCredit Checkout", version: "1" });
 const RETRY_CREDIT_TYPES = Object.freeze({
   Attempt: [
@@ -434,6 +468,61 @@ export class RuleDropWorker {
     throw new WorkerError("BATCH_PROOF_UNAVAILABLE", "The Attestcoin batch proof service is temporarily unavailable", 503, lastError);
   }
 
+  async getUniswapRetryCreditBatchProof({
+    failedTransactionHash,
+    successfulTransactionHash,
+    rule,
+  }) {
+    const hashes = validateRetryBatchHashes(failedTransactionHash, successfulTransactionHash);
+    const expectedRule = normalizeUniswapRetryCreditRule(rule);
+    if (
+      this.sourceChainKey !== RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey
+      || this.sourceChainId !== RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId
+    ) {
+      throw new WorkerError(
+        "INVALID_SOURCE_CHAIN",
+        "The direct-Uniswap RetryCredit route is bound to Ethereum Sepolia",
+      );
+    }
+    const cacheKey = [
+      "retry-credit-uniswap-batch",
+      this.sourceChainKey,
+      this.sourceChainId,
+      uniswapRetryRuleFingerprint(expectedRule),
+      ...hashes,
+    ].join(":");
+    const cached = this.cache.get(cacheKey);
+    if (cached) return cached;
+
+    let lastError;
+    for (let attempt = 1; attempt <= this.proofAttempts; attempt += 1) {
+      try {
+        const result = await this.proofBuilder.getBatchProof(hashes);
+        if (!result.success || !result.data) {
+          throw new Error(result.error || "Proof builder rejected the batch request");
+        }
+        const normalized = normalizeUniswapRetryCreditBatchProof(
+          result.data,
+          hashes,
+          expectedRule,
+          this.sourceChainKey,
+          this.sourceChainId,
+        );
+        return this.cache.set(cacheKey, freezeDeep(normalized));
+      } catch (error) {
+        if (error instanceof WorkerError) throw error;
+        lastError = error;
+        if (attempt < this.proofAttempts) await delay(250 * 2 ** (attempt - 1));
+      }
+    }
+    throw new WorkerError(
+      "BATCH_PROOF_UNAVAILABLE",
+      "The Attestcoin batch proof service is temporarily unavailable",
+      503,
+      lastError,
+    );
+  }
+
   async prepareRetryCreditRelease({
     serviceCreditNumber,
     failedTransactionHash,
@@ -663,7 +752,9 @@ function normalizeRetryCreditRule(rule) {
       || normalized.maxBlockGap <= 0
       || normalized.maxBlockGap > MAX_BATCH_BLOCK_SPAN
       || normalized.minimumAttemptGasLimit <= 0n
+      || normalized.minimumAttemptGasLimit > MAX_UINT64
       || normalized.maxFailureGasUsed <= 0n
+      || normalized.maxFailureGasUsed > MAX_UINT64
       || normalized.settlementRecipient === normalized.beneficiary
       || [
         normalized.attemptSigner,
@@ -807,6 +898,525 @@ function normalizeRetryCreditBatchProof(
     if (error instanceof WorkerError && error.code === "BATCH_PROOF_INVALID") throw error;
     throw new WorkerError("BATCH_PROOF_INVALID", "The Attestcoin batch proof did not match the requested retry", 502, error);
   }
+}
+
+export function decodeUniswapRetryCreditRoute(
+  encodedTransaction,
+  expectedSourceChainId = RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId,
+) {
+  try {
+    const sourceChainId = validateSourceChainId(expectedSourceChainId);
+    if (sourceChainId !== RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId) {
+      throw new Error("the signed Uniswap route is bound to Ethereum Sepolia");
+    }
+    const envelope = decodeAttestedTransactionEnvelope(encodedTransaction);
+    return freezeDeep({
+      ...envelope.metadata,
+      uniswapRetryCredit: decodeUniswapRetryCreditRouteEnvelope(envelope, sourceChainId),
+    });
+  } catch (error) {
+    if (error instanceof WorkerError) throw error;
+    throw new WorkerError(
+      "BATCH_PROOF_INVALID",
+      "The Attestcoin transaction is not a canonical signed RetryCredit Uniswap route",
+      502,
+      error,
+    );
+  }
+}
+
+export function computeUniswapRetryCreditIntent({
+  policyId,
+  actionId,
+  trader,
+  amountIn,
+  weth = RETRY_CREDIT_UNISWAP_SEPOLIA.weth,
+  usdc = RETRY_CREDIT_UNISWAP_SEPOLIA.usdc,
+  pool = RETRY_CREDIT_UNISWAP_SEPOLIA.pool,
+}) {
+  const normalizedPolicyId = String(policyId).toLowerCase();
+  const normalizedActionId = String(actionId).toLowerCase();
+  if (!isHexString(normalizedPolicyId, 32) || /^0x0+$/.test(normalizedPolicyId)) {
+    throw new WorkerError("INVALID_RETRY_CREDIT_RULE", "invalid Uniswap rule policy ID");
+  }
+  if (!isHexString(normalizedActionId, 32) || /^0x0+$/.test(normalizedActionId)) {
+    throw new WorkerError("INVALID_RETRY_CREDIT_RULE", "invalid Uniswap rule action ID");
+  }
+  const normalizedAmountIn = BigInt(amountIn);
+  if (normalizedAmountIn <= 0n) {
+    throw new WorkerError("INVALID_RETRY_CREDIT_RULE", "invalid Uniswap rule input amount");
+  }
+  return keccak256(abiCoder.encode(
+    ["string", "bytes32", "bytes32", "address", "address", "address", "address", "uint256"],
+    [
+      UNISWAP_RETRY_INTENT_LABEL,
+      normalizedPolicyId,
+      normalizedActionId,
+      validateAddress(trader, "Uniswap trader"),
+      validateAddress(weth, "Uniswap WETH"),
+      validateAddress(usdc, "Uniswap USDC"),
+      validateAddress(pool, "Uniswap pool"),
+      normalizedAmountIn,
+    ],
+  ));
+}
+
+export function normalizeUniswapRetryCreditBatchProof(
+  proof,
+  requestedHashes,
+  rule,
+  expectedChainKey = RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey,
+  expectedSourceChainId = RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId,
+) {
+  try {
+    const hashes = validateRetryBatchHashes(requestedHashes?.[0], requestedHashes?.[1]);
+    const normalizedRule = normalizeUniswapRetryCreditRule(rule);
+    if (expectedChainKey !== RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey
+        || expectedSourceChainId !== RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId) {
+      throw new Error("the direct-Uniswap route is bound to Ethereum Sepolia");
+    }
+    if (Number(proof.chainKey) !== expectedChainKey) {
+      throw new Error(`unexpected source chain key ${proof.chainKey}`);
+    }
+    const fromHeader = requireSafeInteger(proof.fromHeader, "fromHeader");
+    const toHeader = requireSafeInteger(proof.toHeader, "toHeader");
+    if (fromHeader > toHeader || toHeader - fromHeader > MAX_BATCH_BLOCK_SPAN) {
+      throw new Error(`invalid batch block range ${fromHeader}-${toHeader}`);
+    }
+    if (!(proof.merkleProofs instanceof Map)) throw new Error("merkleProofs must be a Map");
+
+    const entriesByHash = new Map();
+    for (const [sourceBlockValue, blockProofs] of proof.merkleProofs.entries()) {
+      const sourceBlock = requireSafeInteger(sourceBlockValue, "sourceBlock");
+      if (sourceBlock < fromHeader || sourceBlock > toHeader) {
+        throw new Error(`source block ${sourceBlock} is outside the shared proof range`);
+      }
+      if (!(blockProofs instanceof Map)) throw new Error("per-block merkle proofs must be a Map");
+      for (const [transactionIndexValue, entry] of blockProofs.entries()) {
+        const transactionIndex = requireSafeInteger(transactionIndexValue, "transactionIndex");
+        const transactionHash = validateTransactionHash(entry.txHash);
+        if (!hashes.includes(transactionHash)) {
+          throw new Error(`unexpected transaction ${transactionHash} in batch proof`);
+        }
+        if (entriesByHash.has(transactionHash)) {
+          throw new Error(`duplicate transaction ${transactionHash} in batch proof`);
+        }
+        validateMerkleProof(entry.merkleProof);
+        const envelope = decodeAttestedTransactionEnvelope(entry.txBytes);
+        entriesByHash.set(transactionHash, {
+          transactionHash,
+          sourceBlock,
+          transactionIndex,
+          encodedTransaction: entry.txBytes,
+          merkleProof: entry.merkleProof,
+          metadata: envelope.metadata,
+          route: decodeUniswapRetryCreditRouteEnvelope(envelope, expectedSourceChainId),
+          receiptLogs: envelope.receiptLogs,
+        });
+      }
+    }
+
+    if (entriesByHash.size !== RETRY_BATCH_SIZE || hashes.some((hash) => !entriesByHash.has(hash))) {
+      throw new Error("batch proof did not contain exactly the two requested transactions");
+    }
+    validateContinuityProof(proof.continuityProof);
+
+    const failed = entriesByHash.get(hashes[0]);
+    const successful = entriesByHash.get(hashes[1]);
+    const amountOut = validateUniswapRetryCreditRelationship(
+      failed,
+      successful,
+      normalizedRule,
+      expectedSourceChainId,
+    );
+    successful.amountOut = amountOut.toString();
+    const entries = [failed, successful];
+
+    return {
+      chainKey: expectedChainKey,
+      fromHeader,
+      toHeader,
+      entries,
+      continuityProof: proof.continuityProof,
+      summary: {
+        sourceChainKey: expectedChainKey,
+        fromBlock: fromHeader,
+        toBlock: toHeader,
+        blockSpan: toHeader - fromHeader,
+        continuityRootCount: proof.continuityProof.roots.length,
+        failed: summarizeUniswapRetryBatchEntry(failed),
+        successful: summarizeUniswapRetryBatchEntry(successful),
+      },
+    };
+  } catch (error) {
+    if (error instanceof WorkerError && ["BATCH_PROOF_INVALID", "INVALID_RETRY_CREDIT_RULE"].includes(error.code)) {
+      throw error;
+    }
+    throw new WorkerError(
+      "BATCH_PROOF_INVALID",
+      "The Attestcoin batch proof did not match the signed Uniswap retry",
+      502,
+      error,
+    );
+  }
+}
+
+function normalizeUniswapRetryCreditRule(rule) {
+  try {
+    if (!rule || typeof rule !== "object") throw new Error("an onchain Uniswap RetryCredit rule is required");
+    const normalized = {
+      routeSigner: getAddress(rule.routeSigner),
+      trader: getAddress(rule.trader),
+      router: getAddress(rule.router),
+      weth: getAddress(rule.weth),
+      usdc: getAddress(rule.usdc),
+      pool: getAddress(rule.pool),
+      policyId: String(rule.policyId).toLowerCase(),
+      actionId: String(rule.actionId).toLowerCase(),
+      amountIn: BigInt(rule.amountIn),
+      minimumSuccessfulOut: BigInt(rule.minimumSuccessfulOut),
+      startBlock: requireSafeInteger(rule.startBlock, "rule.startBlock"),
+      endBlock: requireSafeInteger(rule.endBlock, "rule.endBlock"),
+      maxBlockGap: requireSafeInteger(rule.maxBlockGap, "rule.maxBlockGap"),
+      minimumAttemptGasLimit: BigInt(rule.minimumAttemptGasLimit),
+      maxFailureGasUsed: BigInt(rule.maxFailureGasUsed),
+    };
+    if (!isHexString(normalized.policyId, 32) || /^0x0+$/.test(normalized.policyId)) {
+      throw new Error("invalid Uniswap rule policy ID");
+    }
+    if (!isHexString(normalized.actionId, 32) || /^0x0+$/.test(normalized.actionId)) {
+      throw new Error("invalid Uniswap rule action ID");
+    }
+    const official = RETRY_CREDIT_UNISWAP_SEPOLIA;
+    if (
+      normalized.router !== official.router
+      || normalized.weth !== official.weth
+      || normalized.usdc !== official.usdc
+      || normalized.pool !== official.pool
+    ) {
+      throw new Error("Uniswap rule does not match the official Sepolia route");
+    }
+    if (
+      normalized.routeSigner === normalized.trader
+      || normalized.amountIn <= 0n
+      || normalized.minimumSuccessfulOut <= 0n
+      || normalized.startBlock >= normalized.endBlock
+      || normalized.maxBlockGap <= 0
+      || normalized.maxBlockGap > MAX_BATCH_BLOCK_SPAN
+      || normalized.minimumAttemptGasLimit <= 0n
+      || normalized.minimumAttemptGasLimit > MAX_UINT64
+      || normalized.maxFailureGasUsed <= 0n
+      || normalized.maxFailureGasUsed > MAX_UINT64
+      || normalized.maxFailureGasUsed >= normalized.minimumAttemptGasLimit
+      || [normalized.routeSigner, normalized.trader].some((value) => /^0x0{40}$/i.test(value))
+    ) {
+      throw new Error("invalid Uniswap RetryCredit rule bounds");
+    }
+    return normalized;
+  } catch (error) {
+    if (error instanceof WorkerError) throw error;
+    throw new WorkerError("INVALID_RETRY_CREDIT_RULE", error.message, 400, error);
+  }
+}
+
+function uniswapRetryRuleFingerprint(rule) {
+  return keccak256(abiCoder.encode(
+    [
+      "address", "address", "address", "address", "address", "address", "bytes32", "bytes32",
+      "uint256", "uint256", "uint64", "uint64", "uint32", "uint64", "uint64",
+    ],
+    [
+      rule.routeSigner,
+      rule.trader,
+      rule.router,
+      rule.weth,
+      rule.usdc,
+      rule.pool,
+      rule.policyId,
+      rule.actionId,
+      rule.amountIn,
+      rule.minimumSuccessfulOut,
+      rule.startBlock,
+      rule.endBlock,
+      rule.maxBlockGap,
+      rule.minimumAttemptGasLimit,
+      rule.maxFailureGasUsed,
+    ],
+  ));
+}
+
+function decodeUniswapRetryCreditRouteEnvelope(envelope, expectedSourceChainId) {
+  try {
+    if (envelope.metadata.selector !== UNIVERSAL_ROUTER_EXECUTE_SIGNED_SELECTOR) {
+      throw new Error("unexpected Universal Router selector");
+    }
+    const router = getAddress(envelope.metadata.target);
+    if (router !== RETRY_CREDIT_UNISWAP_SEPOLIA.router) {
+      throw new Error("transaction target is not the official Sepolia Universal Router 2.1.1");
+    }
+    const decoded = universalRouterInterface.decodeFunctionData("executeSigned", envelope.calldata);
+    const commands = String(decoded.commands).toLowerCase();
+    const inputs = Array.from(decoded.inputs, (input) => String(input).toLowerCase());
+    const intent = String(decoded.intent).toLowerCase();
+    const data = String(decoded.data).toLowerCase();
+    const verifySender = decoded.verifySender;
+    const nonce = String(decoded.nonce).toLowerCase();
+    const signature = String(decoded.signature).toLowerCase();
+    const deadline = BigInt(decoded.deadline);
+    const canonicalCalldata = universalRouterInterface.encodeFunctionData("executeSigned", [
+      commands,
+      inputs,
+      intent,
+      data,
+      verifySender,
+      nonce,
+      signature,
+      deadline,
+    ]).toLowerCase();
+    if (canonicalCalldata !== envelope.calldata) throw new Error("non-canonical executeSigned calldata");
+    if (commands !== UNIVERSAL_ROUTER_COMMANDS || inputs.length !== 2) {
+      throw new Error("route must contain only WRAP_ETH then V3_SWAP_EXACT_IN");
+    }
+    if (verifySender !== true) throw new Error("signed route must bind the transaction sender");
+    if (!isHexString(intent, 32) || /^0x0+$/.test(intent)) throw new Error("invalid route intent");
+    if (!isHexString(data, 32) || /^0x0+$/.test(data)) throw new Error("invalid route data");
+    if (!isHexString(nonce, 32) || nonce === MAX_BYTES32) throw new Error("invalid signed route nonce");
+    if (!isHexString(signature, 65) || !["1b", "1c"].includes(signature.slice(-2))) {
+      throw new Error("route signature must use canonical 65-byte ECDSA with v 27 or 28");
+    }
+    const parsedSignature = Signature.from(signature);
+    if (parsedSignature.v !== 27 && parsedSignature.v !== 28) throw new Error("invalid route signature v");
+    if (deadline <= 0n) throw new Error("invalid route deadline");
+
+    const [wrapRecipientValue, wrapAmountValue] = abiCoder.decode(["address", "uint256"], inputs[0]);
+    const wrapRecipient = getAddress(wrapRecipientValue);
+    const wrapAmount = BigInt(wrapAmountValue);
+    if (abiCoder.encode(["address", "uint256"], [wrapRecipient, wrapAmount]).toLowerCase() !== inputs[0]) {
+      throw new Error("non-canonical WRAP_ETH input");
+    }
+    if (wrapRecipient !== UNIVERSAL_ROUTER_WRAP_ETH_RECIPIENT) {
+      throw new Error("WRAP_ETH must retain WETH in the router");
+    }
+
+    const [recipientValue, amountInValue, amountOutMinimumValue, pathValue, payerIsUser, minHopPriceValue] =
+      abiCoder.decode(["address", "uint256", "uint256", "bytes", "bool", "uint256[]"], inputs[1]);
+    const recipient = getAddress(recipientValue);
+    const amountIn = BigInt(amountInValue);
+    const amountOutMinimum = BigInt(amountOutMinimumValue);
+    const path = String(pathValue).toLowerCase();
+    const minHopPriceX36 = Array.from(minHopPriceValue, BigInt);
+    const canonicalSwapInput = abiCoder.encode(
+      ["address", "uint256", "uint256", "bytes", "bool", "uint256[]"],
+      [recipient, amountIn, amountOutMinimum, path, payerIsUser, minHopPriceX36],
+    ).toLowerCase();
+    if (canonicalSwapInput !== inputs[1]) throw new Error("non-canonical V3_SWAP_EXACT_IN input");
+    if (recipient !== UNIVERSAL_ROUTER_MSG_SENDER_RECIPIENT) {
+      throw new Error("swap output must be sent to the bound transaction sender");
+    }
+    if (payerIsUser !== false || minHopPriceX36.length !== 0) {
+      throw new Error("swap must spend router-held WETH with no hidden hop-price array");
+    }
+    const expectedPath = encodeUniswapV3Path(
+      RETRY_CREDIT_UNISWAP_SEPOLIA.weth,
+      RETRY_CREDIT_UNISWAP_SEPOLIA.fee,
+      RETRY_CREDIT_UNISWAP_SEPOLIA.usdc,
+    );
+    if (path !== expectedPath) throw new Error("swap path is not exact WETH/500/Circle-USDC");
+    const nativeValue = BigInt(envelope.metadata.value);
+    if (amountIn <= 0n || amountOutMinimum <= 0n || wrapAmount !== amountIn || nativeValue !== amountIn) {
+      throw new Error("native value, wrapped amount, and exact swap input do not match");
+    }
+
+    const trader = getAddress(envelope.metadata.sender);
+    const routeSigner = getAddress(verifyTypedData(
+      {
+        ...UNIVERSAL_ROUTER_DOMAIN,
+        chainId: expectedSourceChainId,
+        verifyingContract: router,
+      },
+      UNIVERSAL_ROUTER_TYPES,
+      {
+        commands,
+        inputs,
+        intent,
+        data,
+        sender: trader,
+        nonce,
+        deadline,
+      },
+      signature,
+    ));
+    if (routeSigner === trader) throw new Error("route signer must be independent from the trader");
+
+    return {
+      sourceChainId: expectedSourceChainId,
+      router,
+      routeSigner,
+      trader,
+      intent,
+      data,
+      nonce,
+      deadline: deadline.toString(),
+      commands,
+      path,
+      weth: RETRY_CREDIT_UNISWAP_SEPOLIA.weth,
+      usdc: RETRY_CREDIT_UNISWAP_SEPOLIA.usdc,
+      pool: RETRY_CREDIT_UNISWAP_SEPOLIA.pool,
+      fee: RETRY_CREDIT_UNISWAP_SEPOLIA.fee,
+      amountIn: amountIn.toString(),
+      amountOutMinimum: amountOutMinimum.toString(),
+      verifySender,
+    };
+  } catch (error) {
+    throw new Error(`invalid signed Universal Router envelope: ${error.message}`);
+  }
+}
+
+function encodeUniswapV3Path(tokenIn, fee, tokenOut) {
+  const feeHex = Number(fee).toString(16).padStart(6, "0");
+  return `0x${tokenIn.slice(2).toLowerCase()}${feeHex}${tokenOut.slice(2).toLowerCase()}`;
+}
+
+function validateUniswapRetryCreditRelationship(failed, successful, rule, expectedSourceChainId) {
+  if (failed.metadata.receiptStatus !== 0) throw new Error("the first Universal Router transaction did not fail");
+  if (successful.metadata.receiptStatus !== 1) throw new Error("the refreshed Universal Router transaction did not succeed");
+  if (failed.receiptLogs.length !== 0) throw new Error("failed transaction unexpectedly contains receipt logs");
+  if (failed.metadata.sender !== successful.metadata.sender || failed.metadata.sender !== rule.trader) {
+    throw new Error("failure and retry traders do not match the funded rule");
+  }
+  if (failed.metadata.target !== successful.metadata.target || failed.metadata.target !== rule.router) {
+    throw new Error("failure and retry routers do not match the funded rule");
+  }
+  if (failed.metadata.calldataHash === successful.metadata.calldataHash) {
+    throw new Error("the retry did not carry refreshed route data");
+  }
+  if (BigInt(successful.metadata.nonce) <= BigInt(failed.metadata.nonce)) {
+    throw new Error("the retry transaction nonce does not increase");
+  }
+  if (failed.sourceBlock >= successful.sourceBlock) {
+    throw new Error("the successful retry does not occur in a later block");
+  }
+  if (failed.sourceBlock < rule.startBlock || successful.sourceBlock > rule.endBlock) {
+    throw new Error("batch source blocks are outside the funded rule window");
+  }
+  if (successful.sourceBlock - failed.sourceBlock > rule.maxBlockGap) {
+    throw new Error("batch exceeds the funded rule block gap");
+  }
+  if (BigInt(failed.metadata.gasLimit) < rule.minimumAttemptGasLimit
+      || BigInt(successful.metadata.gasLimit) < rule.minimumAttemptGasLimit) {
+    throw new Error("one source attempt used less gas than the funded rule requires");
+  }
+  if (BigInt(failed.metadata.receiptGasUsed) > rule.maxFailureGasUsed) {
+    throw new Error("failed route used more gas than the funded rule allows");
+  }
+
+  const stableFields = ["sourceChainId", "router", "routeSigner", "trader", "intent", "commands", "path", "amountIn"];
+  for (const field of stableFields) {
+    if (failed.route[field] !== successful.route[field]) {
+      throw new Error(`failure and retry ${field} differ`);
+    }
+  }
+  if (failed.route.sourceChainId !== expectedSourceChainId) throw new Error("unexpected source chain ID");
+  if (failed.route.routeSigner !== rule.routeSigner) throw new Error("route signer does not match the funded rule");
+  if (BigInt(failed.route.amountIn) !== rule.amountIn) throw new Error("route input does not match the funded rule");
+  const expectedIntent = computeUniswapRetryCreditIntent(rule);
+  if (failed.route.intent !== expectedIntent) throw new Error("signed intent does not match the funded rule");
+  const firstData = zeroPadValue("0x01", 32).toLowerCase();
+  const secondData = zeroPadValue("0x02", 32).toLowerCase();
+  if (failed.route.data !== firstData || successful.route.data !== secondData) {
+    throw new Error("signed route data must advance exactly from quote 1 to quote 2");
+  }
+  if (failed.route.nonce === successful.route.nonce) throw new Error("signed route nonces must differ");
+  if (BigInt(successful.route.deadline) < BigInt(failed.route.deadline)) {
+    throw new Error("refreshed route deadline regressed");
+  }
+  if (BigInt(successful.route.amountOutMinimum) >= BigInt(failed.route.amountOutMinimum)) {
+    throw new Error("refreshed route must lower the stale minimum output");
+  }
+  if (BigInt(successful.route.amountOutMinimum) < rule.minimumSuccessfulOut) {
+    throw new Error("refreshed route minimum output is below the funded rule");
+  }
+  const amountOut = requireUniswapRetrySettlementLogs(successful, rule);
+  if (BigInt(failed.route.amountOutMinimum) <= amountOut) {
+    throw new Error("stale route minimum output did not exceed the eventual pool output");
+  }
+  return amountOut;
+}
+
+function requireUniswapRetrySettlementLogs(successful, rule) {
+  const routerTopic = zeroPadValue(rule.router, 32).toLowerCase();
+  const traderTopic = zeroPadValue(rule.trader, 32).toLowerCase();
+  const poolTopic = zeroPadValue(rule.pool, 32).toLowerCase();
+  let poolSwaps = 0;
+  let poolTransfers = 0;
+  let amountOut;
+
+  for (const log of successful.receiptLogs) {
+    if (
+      log.address === rule.pool
+      && log.topics.length > 0
+      && log.topics[0] === UNISWAP_V3_SWAP_EVENT.toLowerCase()
+    ) {
+      poolSwaps += 1;
+      if (
+        log.topics.length !== 3
+        || log.topics[1] !== routerTopic
+        || log.topics[2] !== traderTopic
+        || !isHexString(log.data, 160)
+      ) {
+        throw new Error("bound Uniswap v3 Swap has invalid topics or data");
+      }
+      const [amount0, amount1, sqrtPriceX96, liquidity] = abiCoder.decode(
+        ["int256", "int256", "uint160", "uint128", "int24"],
+        log.data,
+      );
+      if (amount0 >= 0n || amount1 !== rule.amountIn || sqrtPriceX96 === 0n || liquidity === 0n) {
+        throw new Error("bound Uniswap v3 Swap has invalid deltas or state");
+      }
+      amountOut = -amount0;
+    }
+  }
+  if (poolSwaps !== 1 || !amountOut) {
+    throw new Error(`expected exactly one bound Uniswap v3 Swap, found ${poolSwaps}`);
+  }
+  if (amountOut < BigInt(successful.route.amountOutMinimum) || amountOut < rule.minimumSuccessfulOut) {
+    throw new Error("successful Uniswap output is below the signed or funded minimum");
+  }
+
+  for (const log of successful.receiptLogs) {
+    if (
+      log.address === rule.usdc
+      && log.topics.length === 3
+      && log.topics[0] === ERC20_TRANSFER_EVENT.toLowerCase()
+      && log.topics[1] === poolTopic
+      && isHexString(log.data, 32)
+    ) {
+      poolTransfers += 1;
+      if (
+        log.topics[2] !== traderTopic
+        || BigInt(abiCoder.decode(["uint256"], log.data)[0]) !== amountOut
+      ) {
+        throw new Error("bound Circle USDC transfer has invalid recipient or amount");
+      }
+    }
+  }
+  if (poolTransfers !== 1) {
+    throw new Error(`expected exactly one bound Circle USDC transfer, found ${poolTransfers}`);
+  }
+  return amountOut;
+}
+
+function summarizeUniswapRetryBatchEntry(entry) {
+  return {
+    transactionHash: entry.transactionHash,
+    sourceBlock: entry.sourceBlock,
+    transactionIndex: entry.transactionIndex,
+    ...entry.metadata,
+    uniswapRetryCredit: {
+      ...entry.route,
+      ...(entry.amountOut ? { amountOut: entry.amountOut } : {}),
+    },
+  };
 }
 
 function decodeRetryCreditCheckout(envelope, expectedSourceChainId) {
