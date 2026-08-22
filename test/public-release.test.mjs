@@ -29,6 +29,7 @@ test("public brand, metadata, and primary action describe one RetryCredit releas
   assert.match(app, /Checking availability/);
   assert.match(app, /Temporarily unavailable/);
   assert.match(app, /session\.failedBlock \+ maxBlockGap/);
+  assert.match(app, /current \+ minimumRouteHeadroomBlocks > finalBlock/);
   assert.match(app, /No transaction was sent/);
   assert.match(app, /RetryCredit is temporarily unavailable\. Please try again shortly\./);
   assert.match(app, /verifies receipt state and settlement, not the human-readable reason a route failed/);

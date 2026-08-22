@@ -162,12 +162,15 @@ async function ensureSepolia() {
 }
 async function ensureRouteWindow(session, route, setNotice) {
   const provider = new BrowserProvider(window.ethereum);
-  const { startBlock, endBlock, maxBlockGap } = session.sourceWindow ?? {};
+  const { startBlock, endBlock, maxBlockGap, minimumRouteHeadroomBlocks } = session.sourceWindow ?? {};
   if (!Number.isSafeInteger(startBlock) || !Number.isSafeInteger(endBlock) || startBlock >= endBlock) {
     throw new Error("This saved recovery has invalid source-window data. No transaction was sent.");
   }
   if (route === "success" && (!Number.isSafeInteger(session.failedBlock) || !Number.isSafeInteger(maxBlockGap) || maxBlockGap <= 0)) {
     throw new Error("This saved recovery cannot prove a safe retry window. No transaction was sent.");
+  }
+  if (!Number.isSafeInteger(minimumRouteHeadroomBlocks) || minimumRouteHeadroomBlocks < 2) {
+    throw new Error("This saved recovery has no safe wallet-confirmation buffer. No transaction was sent.");
   }
   for (;;) {
     const current = await provider.getBlockNumber();
@@ -179,10 +182,10 @@ async function ensureRouteWindow(session, route, setNotice) {
     const finalBlock = route === "success"
       ? Math.min(endBlock, session.failedBlock + maxBlockGap)
       : endBlock;
-    if (current >= finalBlock) {
+    if (current + minimumRouteHeadroomBlocks > finalBlock) {
       throw new Error(route === "success"
-        ? "The retry window expired before settlement. No transaction was sent."
-        : "The recovery window expired before the stale route. No transaction was sent.");
+        ? "There is not enough retry-window headroom for a safe wallet confirmation. No transaction was sent."
+        : "There is not enough recovery-window headroom for a safe wallet confirmation. No transaction was sent.");
     }
     return;
   }

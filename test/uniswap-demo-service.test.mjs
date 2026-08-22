@@ -71,6 +71,8 @@ test("prepares one funded service credit and two exact signed official routes", 
   assert.equal(fixture.createdTerms.routeSigner, routeSigner.address);
   assert.equal(fixture.createdTerms.router, RETRY_CREDIT_UNISWAP_SEPOLIA.router);
   assert.equal(fixture.createdTerms.minimumSuccessfulOut, 1_600_000n);
+  assert.equal(fixture.createdTerms.maxBlockGap, 100);
+  assert.equal(fixture.createdTerms.endBlock - fixture.createdTerms.startBlock, 240);
 
   const failed = routerInterface.decodeFunctionData("executeSigned", result.transactions.failed.data);
   const successful = routerInterface.decodeFunctionData("executeSigned", result.transactions.successful.data);
@@ -126,6 +128,7 @@ test("resumes an existing sponsored demo for the same trader without another wri
   assert.equal(result.creationTransaction, fixture.existingCreationHash);
   assert.equal(result.activationTransaction, fixture.existingActivationHash);
   assert.equal(result.sourceWindow.maxBlockGap, 10);
+  assert.equal(result.sourceWindow.minimumRouteHeadroomBlocks, 12);
   assert.equal(fixture.pool.createCalls, 0);
   assert.equal(fixture.pool.activateCalls, 0);
   assert.equal(fixture.sourceFunder.sendCalls, 0);
