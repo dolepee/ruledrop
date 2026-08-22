@@ -48,10 +48,12 @@ test("public evidence links bind the exact fresh lifecycle", () => {
   }
   assert.match(readme, /founder-funded service credits/);
   assert.match(readme, /not customer demand/);
+  assert.match(readme, /reviewed V3 pilot/);
+  assert.match(readme, /V3 pilot is enabled/);
 });
 
-test("deployment configuration is fail-closed and pins the funded pool", () => {
-  assert.match(render, /RETRYCREDIT_PUBLIC_ENABLED\n\s+value: "false"/);
+test("deployment configuration enables only the reviewed funded V3 pool", () => {
+  assert.match(render, /RETRYCREDIT_PUBLIC_ENABLED\n\s+value: "true"/);
   assert.match(render, /RETRYCREDIT_DEMO_PRIVATE_KEY\n\s+sync: false/);
   assert.match(render, /0x81b5d955F4EbfaE02FF6346cf368A2c4347248A1/);
   assert.match(render, /0x97Fa88CfCaeE1a5D4Ae749b9b5698F2147b986fC/);

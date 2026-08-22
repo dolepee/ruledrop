@@ -53,9 +53,9 @@ The previous RuleDrop contracts remain in the repository as an archived proof-en
 
 ## Public service
 
-The relayed V2 service authenticates one short-lived wallet challenge, pre-funds the Creditcoin service credit, signs two official Universal Router routes from a separate service wallet, and commits the signed source transactions on Creditcoin before either is broadcast. It then executes the bounded Sepolia retry with the visitor as the test-USDC recipient, waits for Attestcoin finality, simulates the exact release, and submits through an isolated relayer. The visitor wallet never deposits an asset or approves a token; the same address receives the settled test-USDC and the Creditcoin credit. Durable authorization, source commitments, and replay state remain onchain.
+The reviewed V3 pilot authenticates one short-lived wallet challenge, pre-funds the Creditcoin service credit, signs two official Universal Router routes from a separate service wallet, and commits the exact raw signed source transactions on Creditcoin before either is broadcast. It then executes the bounded Sepolia retry with the visitor as the test-USDC recipient, waits for Attestcoin finality, simulates the exact release, and submits through an isolated relayer. The visitor wallet never deposits an asset or approves a token; the same address receives the settled test-USDC and the Creditcoin credit. Durable authorization, source commitments, and replay state remain onchain.
 
-Public sponsorship is capped per deployment and fails closed when the service wallet or reserve is unavailable. The relayed V2 allocation remains disabled until its reviewed deployment completes fresh end-to-end release and restart checks.
+The V3 pilot is enabled at pool `0x81b5d955F4EbfaE02FF6346cf368A2c4347248A1` after two fresh end-to-end releases with distinct beneficiaries and a service restart. Public sponsorship remains founder-funded, testnet-only, capped per deployment, and fails closed when the service wallet or reserve is unavailable.
 
 ## Local verification
 
