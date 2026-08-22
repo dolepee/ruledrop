@@ -58,6 +58,12 @@ const artifacts = {
   verifier: "out/AttestcoinRetryCreditUniversalRouterVerifier.sol/AttestcoinRetryCreditUniversalRouterVerifier.json",
   pool: "out/RetryCreditUniversalRouterPool.sol/RetryCreditUniversalRouterPool.json",
 };
+const publicV2Artifacts = {
+  decoder: "out/EvmV1Decoder.sol/EvmV1Decoder.json",
+  predicate: "out/RetryCreditUniversalRouterPredicateV2.sol/RetryCreditUniversalRouterPredicateV2.json",
+  verifier: "out/AttestcoinRetryCreditUniversalRouterVerifierV2.sol/AttestcoinRetryCreditUniversalRouterVerifierV2.json",
+  pool: "out/RetryCreditUniversalRouterPoolV2.sol/RetryCreditUniversalRouterPoolV2.json",
+};
 const poolAbi = [
   "event ServiceCreditDraftCreated(uint256 indexed serviceCreditNumber,address indexed sponsor,address indexed trader,uint256 creditAmount,uint64 refundAfter,uint256 creationBlock,bytes32 termsHash)",
   "event ServiceCreditActivated(uint256 indexed serviceCreditNumber,bytes32 indexed policyId,bytes32 creationBlockHash)",
@@ -102,8 +108,8 @@ const routeTypes = {
 
 async function main() {
   const [mode, inputStatePath, label = "run"] = process.argv.slice(2);
-  if (!["deploy", "prepare", "source", "release", "status"].includes(mode)) {
-    throw new Error("usage: node scripts/retrycredit-uniswap-spike-runner.mjs <deploy|prepare|source|release|status> [input-state.json] [label]");
+  if (!["deploy", "deploy-public-v2", "prepare", "source", "release", "status"].includes(mode)) {
+    throw new Error("usage: node scripts/retrycredit-uniswap-spike-runner.mjs <deploy|deploy-public-v2|prepare|source|release|status> [input-state.json] [label]");
   }
   const ccProvider = new JsonRpcProvider(CC_RPC, CREDITCOIN_CHAIN_ID, { staticNetwork: true });
   const sepoliaProvider = new JsonRpcProvider(SEPOLIA_RPC, RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId, { staticNetwork: true });
@@ -125,6 +131,13 @@ async function main() {
   requireExpectedOperator(trader.address);
   const routeSigner = new Wallet(deriveKey(privateKey, "RETRYCREDIT_UNISWAP_ROUTE_SIGNER_V1"));
   const relayer = new Wallet(deriveKey(privateKey, "RETRYCREDIT_UNISWAP_CC3_RELAYER_V1"), ccProvider);
+
+  if (mode === "deploy-public-v2") {
+    const state = await deployPublicV2Infrastructure({ ccProvider, operator, label });
+    await persistState(state);
+    print(state);
+    return;
+  }
 
   if (mode === "deploy") {
     const state = await deployInfrastructure({ ccProvider, operator, routeSigner, relayer, label });
@@ -156,6 +169,58 @@ async function main() {
   const result = await releaseCredit({ state, ccProvider, operator, relayer });
   await persistState(result);
   print(result);
+}
+
+async function deployPublicV2Infrastructure({ ccProvider, operator, label }) {
+  await requireBalance(ccProvider, operator.address, parseEther("0.5"), "CC3 public-demo sponsor");
+  const routeSigner = new Wallet(deriveKey(operator.privateKey, "RETRYCREDIT_PUBLIC_ROUTE_SIGNER_V2"));
+  const relayer = new Wallet(deriveKey(operator.privateKey, "RETRYCREDIT_PUBLIC_CC3_RELAYER_V2"), ccProvider);
+  const decoder = await deploy("decoder", publicV2Artifacts.decoder, operator, []);
+  const predicate = await deploy("predicate-v2", publicV2Artifacts.predicate, operator, [], { EvmV1Decoder: decoder.address });
+  const verifier = await deploy("verifier-v2", publicV2Artifacts.verifier, operator, [
+    predicate.address,
+    ZeroAddress,
+    RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey,
+    RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId,
+  ]);
+  const pool = await deploy("pool-v2", publicV2Artifacts.pool, operator, [verifier.address, ZeroAddress]);
+  const relayerBalance = await ccProvider.getBalance(relayer.address);
+  let relayerFundingTransaction = null;
+  if (relayerBalance < RELAYER_TARGET_BALANCE) {
+    const receipt = await sendSuccess(operator.sendTransaction({
+      to: relayer.address,
+      value: RELAYER_TARGET_BALANCE - relayerBalance,
+    }));
+    relayerFundingTransaction = receipt.hash;
+  }
+  return {
+    schemaVersion: "retrycredit.public-v2.v1",
+    stage: "deployed",
+    label,
+    operator: operator.address,
+    routeSigner: routeSigner.address,
+    relayer: relayer.address,
+    contracts: {
+      decoder: decoder.address,
+      predicate: predicate.address,
+      verifier: verifier.address,
+      pool: pool.address,
+    },
+    runtimeCodeHashes: {
+      decoder: decoder.runtimeCodeHash,
+      predicate: predicate.runtimeCodeHash,
+      verifier: verifier.runtimeCodeHash,
+      pool: pool.runtimeCodeHash,
+    },
+    deploymentTransactions: {
+      decoder: decoder.transactionHash,
+      predicate: predicate.transactionHash,
+      verifier: verifier.transactionHash,
+      pool: pool.transactionHash,
+      relayerFunding: relayerFundingTransaction,
+    },
+    truthBoundary: "Public relayed testnet pilot infrastructure; user receives tCTC while a service wallet executes the bounded Sepolia route. Not production insurance or demand evidence.",
+  };
 }
 
 async function deployInfrastructure({ ccProvider, operator, routeSigner, relayer, label }) {
