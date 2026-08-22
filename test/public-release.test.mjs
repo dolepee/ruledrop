@@ -18,11 +18,18 @@ test("public brand, metadata, and primary action describe one RetryCredit releas
   assert.doesNotMatch(html, /github\.com\/dolepee\/ruledrop/);
   assert.doesNotMatch(html, /RuleDrop/);
   assert.match(app, /Finish the swap/);
-  assert.match(app, /PUBLIC PRIMARY ACTION/);
-  assert.match(app, /no mainnet asset or approval/i);
+  assert.match(app, /YOUR RECOVERY/);
+  assert.match(app, /Connect wallet to start/);
+  assert.match(app, /How this recovery is verified/);
+  assert.doesNotMatch(app, /href="#proof"/);
+  assert.doesNotMatch(app, />Proof</);
+  assert.doesNotMatch(app, /PUBLIC PRIMARY ACTION/);
+  assert.match(app, /no mainnet asset or token approval/i);
   assert.match(app, /!session && config\?\.enabled !== true/);
-  assert.match(app, /Checking public allocation/);
-  assert.match(app, /Attestcoin proves receipt state and settlement, not the human-readable revert reason/);
+  assert.match(app, /Checking availability/);
+  assert.match(app, /Temporarily unavailable/);
+  assert.match(app, /RetryCredit is temporarily unavailable\. Please try again shortly\./);
+  assert.match(app, /verifies receipt state and settlement, not the human-readable reason a route failed/);
 });
 
 test("public evidence links bind the exact fresh lifecycle", () => {
