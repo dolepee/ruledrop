@@ -10,13 +10,14 @@ The current public pilot is deliberately narrow:
 - Official Uniswap Universal Router 2.1.1.
 - One WETH → Circle test-USDC fee-500 route.
 - One bounded sponsor-funded credit per visitor wallet.
+- A relayed testnet route: the visitor signs only to name the wallet that receives both test-USDC output and the Creditcoin credit.
 - Test assets only; no mainnet value, insurance, or exact gas reimbursement.
 
 ## Why Attestcoin is load-bearing
 
 The Creditcoin release requires one native Attestcoin batch containing both ordered source receipts. The verifier enforces:
 
-1. The same trader, funded action, official router, input amount, and signed intent.
+1. The same service executor, visitor beneficiary, funded action, official router, input amount, and signed intent.
 2. A status-0 receipt followed by a status-1 receipt in a bounded source window.
 3. A newer route nonce, quote marker, deadline, and improved minimum output.
 4. One exact Uniswap pool `Swap` and one exact Circle test-USDC transfer to the trader.
@@ -43,18 +44,18 @@ Both executions used test assets and founder-funded service credits. They prove 
 
 ## Contracts
 
-- `RetryCreditUniversalRouterPool`: pre-funded drafts, blockhash-derived activation, fixed release, refunds, and replay consumption.
-- `AttestcoinUniswapRetryVerifier`: native batch verification and source identity derivation.
-- `RetryCreditUniversalRouterPredicateV1`: canonical signed-router decoding, retry correlation, receipt ordering, and exact settlement evidence.
+- `RetryCreditUniversalRouterPoolV2`: pre-funded drafts, a distinct visitor beneficiary, committed source transactions, fixed release, refunds, and replay consumption.
+- `AttestcoinRetryCreditUniversalRouterVerifierV2`: native batch verification and source identity derivation.
+- `RetryCreditUniversalRouterPredicateV2`: canonical signed-router decoding, beneficiary-bound retry correlation, receipt ordering, and exact settlement evidence.
 - `EvmV1Decoder`: strict Attestcoin EVM receipt decoding.
 
 The previous RuleDrop contracts remain in the repository as an archived proof-engine predecessor. They are not the current product or public release claim.
 
 ## Public service
 
-The Node service authenticates one short-lived wallet challenge, funds bounded Sepolia gas before reserving a Creditcoin credit, signs two official Universal Router routes without custody of the visitor wallet, waits for Attestcoin finality, simulates the exact release, and submits through an isolated relayer. Public transaction state is saved in the visitor's browser; durable authorization and replay state remain onchain.
+The relayed V2 service authenticates one short-lived wallet challenge, pre-funds the Creditcoin service credit, signs two official Universal Router routes from a separate service wallet, and commits the signed source transactions on Creditcoin before either is broadcast. It then executes the bounded Sepolia retry with the visitor as the test-USDC recipient, waits for Attestcoin finality, simulates the exact release, and submits through an isolated relayer. The visitor wallet never deposits an asset or approves a token; the same address receives the settled test-USDC and the Creditcoin credit. Durable authorization, source commitments, and replay state remain onchain.
 
-Public sponsorship is capped per deployment and fails closed when the faucet or reserve is unavailable.
+Public sponsorship is capped per deployment and fails closed when the service wallet or reserve is unavailable. The relayed V2 allocation remains disabled until its reviewed deployment completes fresh end-to-end release and restart checks.
 
 ## Local verification
 
@@ -64,7 +65,7 @@ npm test
 npm run build
 ```
 
-The repository currently covers 55 Foundry tests and 162 Node tests, including malformed proofs, route mutations, source identity drift, replay, unauthenticated infrastructure, wallet ownership, faucet ordering, and sponsor/relayer separation.
+The repository covers the V1 evidence path and the V2 relayed path, including malformed proofs, route mutations, source identity drift, replay, unauthenticated infrastructure, distinct beneficiary binding, restart-safe source commitments, and sponsor/relayer separation.
 
 ## Truth boundary
 

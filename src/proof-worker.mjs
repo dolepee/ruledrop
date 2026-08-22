@@ -62,6 +62,16 @@ const UNISWAP_RETRY_CREDIT_POOL_ABI = [
   "function chainInfo() view returns (address)",
   "function releaseCredit(uint256 serviceCreditNumber,(uint64[] sourceBlocks,bytes[] encodedTransactions,(bytes32 root,(bytes32 hash,bool isLeft)[] siblings)[] merkleProofs,bytes32 lowerEndpointDigest,bytes32[] continuityRoots) proof)",
 ];
+const UNISWAP_RETRY_CREDIT_POOL_V2_ABI = [
+  "function getRule(uint256 serviceCreditNumber) view returns ((address routeSigner,address trader,address beneficiary,address router,address weth,address usdc,address pool,bytes32 policyId,bytes32 actionId,uint256 amountIn,uint256 minimumSuccessfulOut,uint64 startBlock,uint64 endBlock,uint32 maxBlockGap,uint64 minimumAttemptGasLimit,uint64 maxFailureGasUsed))",
+  "function getServiceCredit(uint256 serviceCreditNumber) view returns ((address sponsor,uint256 creditAmount,uint64 refundAfter,uint256 creationBlock,bytes32 termsHash,bool released,bool refunded))",
+  "function sourceChainKey() view returns (uint64)",
+  "function sourceChainId() view returns (uint64)",
+  "function retryVerifier() view returns (address)",
+  "function predicate() view returns (address)",
+  "function chainInfo() view returns (address)",
+  "function releaseCredit(uint256 serviceCreditNumber,(uint64[] sourceBlocks,bytes[] encodedTransactions,(bytes32 root,(bytes32 hash,bool isLeft)[] siblings)[] merkleProofs,bytes32 lowerEndpointDigest,bytes32[] continuityRoots) proof)",
+];
 const RETRY_CREDIT_VERIFIER_ABI = [
   "function sourceChainKey() view returns (uint64)",
   "function sourceChainId() view returns (uint64)",
@@ -98,6 +108,7 @@ const UNIVERSAL_ROUTER_TYPES = Object.freeze({
 const MAX_BYTES32 = `0x${"ff".repeat(32)}`;
 const MAX_UINT64 = (1n << 64n) - 1n;
 const UNISWAP_RETRY_INTENT_LABEL = "RETRYCREDIT_UNISWAP_V1";
+const UNISWAP_RETRY_INTENT_V2_LABEL = "RETRYCREDIT_UNISWAP_V2";
 const RETRY_CREDIT_DOMAIN = Object.freeze({ name: "RetryCredit Checkout", version: "1" });
 const RETRY_CREDIT_TYPES = Object.freeze({
   Attempt: [
@@ -304,6 +315,7 @@ export class RuleDropWorker {
     uniswapRetryCreditPoolAddress,
     uniswapRetryCreditPoolContract,
     uniswapRetryCreditVerifierContract,
+    uniswapRetryCreditPoolVersion = 1,
   }) {
     this.poolAddress = validateAddress(poolAddress, "pool address");
     this.poolAbi = poolAbi;
@@ -324,11 +336,18 @@ export class RuleDropWorker {
     this.uniswapRetryCreditPoolAddress = uniswapRetryCreditPoolAddress
       ? validateAddress(uniswapRetryCreditPoolAddress, "direct-Uniswap RetryCredit pool address")
       : null;
+    if (![1, 2].includes(uniswapRetryCreditPoolVersion)) {
+      throw new Error("direct-Uniswap RetryCredit pool version must be 1 or 2");
+    }
+    this.uniswapRetryCreditPoolVersion = uniswapRetryCreditPoolVersion;
+    const uniswapPoolAbi = uniswapRetryCreditPoolVersion === 2
+      ? UNISWAP_RETRY_CREDIT_POOL_V2_ABI
+      : UNISWAP_RETRY_CREDIT_POOL_ABI;
     this.uniswapRetryCreditPool = uniswapRetryCreditPoolContract
       ?? (this.uniswapRetryCreditPoolAddress
-        ? new Contract(this.uniswapRetryCreditPoolAddress, UNISWAP_RETRY_CREDIT_POOL_ABI, this.creditcoinProvider)
+        ? new Contract(this.uniswapRetryCreditPoolAddress, uniswapPoolAbi, this.creditcoinProvider)
         : null);
-    this.uniswapRetryCreditPoolInterface = new Interface(UNISWAP_RETRY_CREDIT_POOL_ABI);
+    this.uniswapRetryCreditPoolInterface = new Interface(uniswapPoolAbi);
     this.uniswapRetryCreditVerifierContract = uniswapRetryCreditVerifierContract ?? null;
     this.proofBuilder = proofBuilder
       ?? new proofProvider.service.ProofBuilder(this.sourceChainKey, proofBuilderUrl, 120_000);
@@ -1088,6 +1107,7 @@ export function computeUniswapRetryCreditIntent({
   policyId,
   actionId,
   trader,
+  beneficiary,
   amountIn,
   weth = RETRY_CREDIT_UNISWAP_SEPOLIA.weth,
   usdc = RETRY_CREDIT_UNISWAP_SEPOLIA.usdc,
@@ -1105,19 +1125,25 @@ export function computeUniswapRetryCreditIntent({
   if (normalizedAmountIn <= 0n) {
     throw new WorkerError("INVALID_RETRY_CREDIT_RULE", "invalid Uniswap rule input amount");
   }
-  return keccak256(abiCoder.encode(
-    ["string", "bytes32", "bytes32", "address", "address", "address", "address", "uint256"],
-    [
-      UNISWAP_RETRY_INTENT_LABEL,
+  const normalizedTrader = validateAddress(trader, "Uniswap trader");
+  const normalizedBeneficiary = beneficiary == null
+    ? null
+    : validateAddress(beneficiary, "Uniswap beneficiary");
+  const types = normalizedBeneficiary
+    ? ["string", "bytes32", "bytes32", "address", "address", "address", "address", "address", "uint256"]
+    : ["string", "bytes32", "bytes32", "address", "address", "address", "address", "uint256"];
+  const values = [
+      normalizedBeneficiary ? UNISWAP_RETRY_INTENT_V2_LABEL : UNISWAP_RETRY_INTENT_LABEL,
       normalizedPolicyId,
       normalizedActionId,
-      validateAddress(trader, "Uniswap trader"),
+      normalizedTrader,
+      ...(normalizedBeneficiary ? [normalizedBeneficiary] : []),
       validateAddress(weth, "Uniswap WETH"),
       validateAddress(usdc, "Uniswap USDC"),
       validateAddress(pool, "Uniswap pool"),
       normalizedAmountIn,
-    ],
-  ));
+    ];
+  return keccak256(abiCoder.encode(types, values));
 }
 
 export function normalizeUniswapRetryCreditBatchProof(
@@ -1226,6 +1252,7 @@ function normalizeUniswapRetryCreditRule(rule) {
     const normalized = {
       routeSigner: getAddress(rule.routeSigner),
       trader: getAddress(rule.trader),
+      ...(rule.beneficiary == null ? {} : { beneficiary: getAddress(rule.beneficiary) }),
       router: getAddress(rule.router),
       weth: getAddress(rule.weth),
       usdc: getAddress(rule.usdc),
@@ -1257,6 +1284,11 @@ function normalizeUniswapRetryCreditRule(rule) {
     }
     if (
       normalized.routeSigner === normalized.trader
+      || (normalized.beneficiary != null && (
+        normalized.beneficiary === normalized.trader
+        || normalized.beneficiary === normalized.routeSigner
+        || /^0x0{40}$/i.test(normalized.beneficiary)
+      ))
       || normalized.amountIn <= 0n
       || normalized.minimumSuccessfulOut <= 0n
       || normalized.startBlock >= normalized.endBlock
@@ -1357,9 +1389,7 @@ function decodeUniswapRetryCreditRouteEnvelope(envelope, expectedSourceChainId) 
       [recipient, amountIn, amountOutMinimum, path, payerIsUser, minHopPriceX36],
     ).toLowerCase();
     if (canonicalSwapInput !== inputs[1]) throw new Error("non-canonical V3_SWAP_EXACT_IN input");
-    if (recipient !== UNIVERSAL_ROUTER_MSG_SENDER_RECIPIENT) {
-      throw new Error("swap output must be sent to the bound transaction sender");
-    }
+    if (/^0x0{40}$/i.test(recipient)) throw new Error("swap output recipient must be nonzero");
     if (payerIsUser !== false || minHopPriceX36.length !== 0) {
       throw new Error("swap must spend router-held WETH with no hidden hop-price array");
     }
@@ -1400,6 +1430,7 @@ function decodeUniswapRetryCreditRouteEnvelope(envelope, expectedSourceChainId) 
       router,
       routeSigner,
       trader,
+      recipient,
       intent,
       data,
       nonce,
@@ -1457,7 +1488,7 @@ function validateUniswapRetryCreditRelationship(failed, successful, rule, expect
     throw new Error("failed route used more gas than the funded rule allows");
   }
 
-  const stableFields = ["sourceChainId", "router", "routeSigner", "trader", "intent", "commands", "path", "amountIn"];
+  const stableFields = ["sourceChainId", "router", "routeSigner", "trader", "recipient", "intent", "commands", "path", "amountIn"];
   for (const field of stableFields) {
     if (failed.route[field] !== successful.route[field]) {
       throw new Error(`failure and retry ${field} differ`);
@@ -1465,6 +1496,8 @@ function validateUniswapRetryCreditRelationship(failed, successful, rule, expect
   }
   if (failed.route.sourceChainId !== expectedSourceChainId) throw new Error("unexpected source chain ID");
   if (failed.route.routeSigner !== rule.routeSigner) throw new Error("route signer does not match the funded rule");
+  const expectedRecipient = rule.beneficiary ?? UNIVERSAL_ROUTER_MSG_SENDER_RECIPIENT;
+  if (failed.route.recipient !== expectedRecipient) throw new Error("swap recipient does not match the funded rule");
   if (BigInt(failed.route.amountIn) !== rule.amountIn) throw new Error("route input does not match the funded rule");
   const expectedIntent = computeUniswapRetryCreditIntent(rule);
   if (failed.route.intent !== expectedIntent) throw new Error("signed intent does not match the funded rule");
@@ -1492,7 +1525,7 @@ function validateUniswapRetryCreditRelationship(failed, successful, rule, expect
 
 function requireUniswapRetrySettlementLogs(successful, rule) {
   const routerTopic = zeroPadValue(rule.router, 32).toLowerCase();
-  const traderTopic = zeroPadValue(rule.trader, 32).toLowerCase();
+  const recipientTopic = zeroPadValue(rule.beneficiary ?? rule.trader, 32).toLowerCase();
   const poolTopic = zeroPadValue(rule.pool, 32).toLowerCase();
   let poolSwaps = 0;
   let poolTransfers = 0;
@@ -1508,7 +1541,7 @@ function requireUniswapRetrySettlementLogs(successful, rule) {
       if (
         log.topics.length !== 3
         || log.topics[1] !== routerTopic
-        || log.topics[2] !== traderTopic
+        || log.topics[2] !== recipientTopic
         || !isHexString(log.data, 160)
       ) {
         throw new Error("bound Uniswap v3 Swap has invalid topics or data");
@@ -1540,7 +1573,7 @@ function requireUniswapRetrySettlementLogs(successful, rule) {
     ) {
       poolTransfers += 1;
       if (
-        log.topics[2] !== traderTopic
+        log.topics[2] !== recipientTopic
         || BigInt(abiCoder.decode(["uint256"], log.data)[0]) !== amountOut
       ) {
         throw new Error("bound Circle USDC transfer has invalid recipient or amount");

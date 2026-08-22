@@ -44,6 +44,7 @@ const TEST_ONLY_OTHER_SIGNER_KEY = `0x${"32".repeat(32)}`;
 const TEST_ONLY_TRADER_KEY = `0x${"33".repeat(32)}`;
 const ROUTE_SIGNER = computeAddress(new SigningKey(TEST_ONLY_ROUTE_SIGNER_KEY).publicKey);
 const TRADER = computeAddress(new SigningKey(TEST_ONLY_TRADER_KEY).publicKey);
+const BENEFICIARY = "0x9999999999999999999999999999999999999999";
 const POLICY_ID = keccak256(Buffer.from("retrycredit-uniswap-policy"));
 const ACTION_ID = keccak256(Buffer.from("retrycredit-uniswap-action"));
 const FAILED_HASH = `0x${"a1".repeat(32)}`;
@@ -134,6 +135,45 @@ test("derives the exact funded intent instead of trusting caller-provided route 
     ],
   ));
   assert.equal(computeUniswapRetryCreditIntent(rule), expected);
+});
+
+test("V2 intent binds a distinct Creditcoin beneficiary without changing the source trader", () => {
+  const rule = uniswapRuleFixture({ beneficiary: BENEFICIARY });
+  const expected = keccak256(abiCoder.encode(
+    ["string", "bytes32", "bytes32", "address", "address", "address", "address", "address", "uint256"],
+    [
+      "RETRYCREDIT_UNISWAP_V2",
+      POLICY_ID,
+      ACTION_ID,
+      TRADER,
+      BENEFICIARY,
+      RETRY_CREDIT_UNISWAP_SEPOLIA.weth,
+      RETRY_CREDIT_UNISWAP_SEPOLIA.usdc,
+      RETRY_CREDIT_UNISWAP_SEPOLIA.pool,
+      AMOUNT_IN,
+    ],
+  ));
+  assert.equal(computeUniswapRetryCreditIntent(rule), expected);
+  assert.notEqual(computeUniswapRetryCreditIntent(rule), computeUniswapRetryCreditIntent(uniswapRuleFixture()));
+});
+
+test("authenticates and prepares a release for the funded distinct-beneficiary V2 rule", async () => {
+  const rule = uniswapRuleFixture({ beneficiary: BENEFICIARY });
+  const proof = uniswapBatchFixture({ ruleOverrides: { beneficiary: BENEFICIARY } });
+  const poolContract = uniswapRetryCreditPoolFixture({ getRule: () => rule });
+  const worker = makeUniswapWorker({
+    uniswapRetryCreditPoolVersion: 2,
+    uniswapRetryCreditPoolContract: poolContract,
+    proofBuilder: { async getBatchProof() { return { success: true, data: proof }; } },
+  });
+  const prepared = await worker.prepareUniswapRetryCreditRelease({
+    serviceCreditNumber: 1,
+    failedTransactionHash: FAILED_HASH,
+    successfulTransactionHash: SUCCESS_HASH,
+    relayer: RELAYER,
+  });
+  assert.equal(prepared.simulationPassed, true);
+  assert.equal(poolContract.simulationCalls, 1);
 });
 
 test("matches the pinned read-only Sepolia Universal Router signature fixture", () => {
@@ -532,8 +572,9 @@ function uniswapBatchFixture({
   successTx = {},
   successLogs = "valid",
   successBlock = 10_000_001,
+  ruleOverrides = {},
 } = {}) {
-  const rule = uniswapRuleFixture();
+  const rule = uniswapRuleFixture(ruleOverrides);
   const intent = computeUniswapRetryCreditIntent(rule);
   const failedRoute = signedRouteFixture({
     intent,
@@ -541,6 +582,7 @@ function uniswapBatchFixture({
     nonce: zeroPadValue("0x11", 32),
     deadline: 4_102_444_800n,
     amountOutMinimum: FAILED_MINIMUM_OUT,
+    recipient: rule.beneficiary ?? "0x0000000000000000000000000000000000000001",
     ...failureRoute,
   });
   const successfulRoute = signedRouteFixture({
@@ -549,9 +591,10 @@ function uniswapBatchFixture({
     nonce: zeroPadValue("0x12", 32),
     deadline: 4_102_444_801n,
     amountOutMinimum: SUCCESS_MINIMUM_OUT,
+    recipient: rule.beneficiary ?? "0x0000000000000000000000000000000000000001",
     ...successRoute,
   });
-  const logs = settlementLogs(successLogs);
+  const logs = settlementLogs(successLogs, rule.beneficiary ?? TRADER);
   const failedLogs = failureTx.logs === "valid" ? logs : (failureTx.logs ?? []);
   const failedEntry = {
     txHash: FAILED_HASH,
@@ -650,11 +693,11 @@ function signedRouteFixture({
   ]);
 }
 
-function settlementLogs(mode) {
+function settlementLogs(mode, expectedRecipient = TRADER) {
   const swapAmountIn = mode === "wrong-input" ? AMOUNT_IN - 1n : AMOUNT_IN;
   const swapRecipient = mode === "wrong-swap-recipient"
     ? "0x1111111111111111111111111111111111111111"
-    : TRADER;
+    : expectedRecipient;
   const sqrtPrice = mode === "zero-pool-state" ? 0n : 79_228_162_514_264_337_593_543_950_336n;
   const swap = {
     address_: RETRY_CREDIT_UNISWAP_SEPOLIA.pool,
@@ -671,7 +714,7 @@ function settlementLogs(mode) {
   const transferAmount = mode === "wrong-transfer-amount" ? ACTUAL_AMOUNT_OUT - 1n : ACTUAL_AMOUNT_OUT;
   const transferRecipient = mode === "wrong-transfer-recipient"
     ? "0x1111111111111111111111111111111111111111"
-    : TRADER;
+    : expectedRecipient;
   const transfer = {
     address_: RETRY_CREDIT_UNISWAP_SEPOLIA.usdc,
     topics: [

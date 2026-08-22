@@ -48,6 +48,7 @@ if (RETRY_CREDIT_ENABLED) {
     proofBuilder: new proofProvider.service.ProofBuilder(1, PROOF_BUILDER_URL, 120_000),
     publicOrigin: PUBLIC_ORIGIN,
   });
+  await retryCreditService.readiness();
 }
 
 createServer(async (request, response) => {
@@ -87,7 +88,7 @@ createServer(async (request, response) => {
     if (request.method === "POST" && url.pathname === "/api/retry-credit/challenge") {
       requireRetryCreditService();
       const body = await readJson(request);
-      sendJson(response, 200, retryCreditService.challenge(body.trader));
+      sendJson(response, 200, retryCreditService.challenge(body.beneficiary));
       return;
     }
 
@@ -102,6 +103,13 @@ createServer(async (request, response) => {
     if (request.method === "GET" && retryStatusMatch) {
       requireRetryCreditService();
       sendJson(response, 200, await retryCreditService.status(retryStatusMatch[1]));
+      return;
+    }
+
+    const retryExecuteMatch = url.pathname.match(/^\/api\/retry-credit\/(\d+)\/execute$/);
+    if (request.method === "POST" && retryExecuteMatch) {
+      requireRetryCreditService();
+      sendJson(response, 200, await retryCreditService.execute(retryExecuteMatch[1]));
       return;
     }
 

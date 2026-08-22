@@ -20,7 +20,10 @@ test("public brand, metadata, and primary action describe one RetryCredit releas
   assert.match(app, /Finish the swap/);
   assert.match(app, /YOUR RECOVERY/);
   assert.match(app, /Connect wallet to start/);
+  assert.match(app, /hexlify\(toUtf8Bytes\(challenge\.message\)\)/);
   assert.match(app, /How this recovery is verified/);
+  assert.match(app, /Restart saved run/);
+  assert.match(app, /session && <button className="secondary"/);
   assert.doesNotMatch(app, /href="#proof"/);
   assert.doesNotMatch(app, />Proof</);
   assert.doesNotMatch(app, /PUBLIC PRIMARY ACTION/);
