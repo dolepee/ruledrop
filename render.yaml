@@ -14,7 +14,7 @@ services:
       - key: PUBLIC_ORIGIN
         value: https://retrycredit.dolepee.com
       - key: RETRYCREDIT_PUBLIC_ENABLED
-        value: "true"
+        value: "false"
       - key: RETRYCREDIT_DEMO_PRIVATE_KEY
         sync: false
       - key: RETRYCREDIT_POOL_ADDRESS

@@ -49,8 +49,8 @@ test("public evidence links bind the exact fresh lifecycle", () => {
   assert.match(readme, /not customer demand/);
 });
 
-test("deployment configuration enables the bounded allocation and requires its secret", () => {
-  assert.match(render, /RETRYCREDIT_PUBLIC_ENABLED\n\s+value: "true"/);
+test("deployment configuration remains fail-closed and requires its secret", () => {
+  assert.match(render, /RETRYCREDIT_PUBLIC_ENABLED\n\s+value: "false"/);
   assert.match(render, /RETRYCREDIT_DEMO_PRIVATE_KEY\n\s+sync: false/);
   assert.match(render, /0x9f29325134D48602B09647B16220Ef8Af350692A/);
   assert.match(render, /0xc89e4d598b2c62f48eeBaB371B1B7f4B459325BA/);
