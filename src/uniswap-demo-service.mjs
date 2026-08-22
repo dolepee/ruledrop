@@ -68,7 +68,7 @@ export const PUBLIC_DEMO_VERIFIER_ABI = [
 const CHAIN_INFO = getAddress("0x0000000000000000000000000000000000000fd3");
 const QUOTER = getAddress("0xEd1f6473345F45b75F8179591dd5bA1888cf2FB3");
 const ZERO_BYTES32 = `0x${"00".repeat(32)}`;
-const PUBLIC_PILOT_VERSION = keccak256(toUtf8Bytes("RETRYCREDIT_PUBLIC_V2"));
+const PUBLIC_PILOT_VERSION = keccak256(toUtf8Bytes("RETRYCREDIT_PUBLIC_V3"));
 const abiCoder = AbiCoder.defaultAbiCoder();
 const routerInterface = new Interface([
   "function executeSigned(bytes commands,bytes[] inputs,bytes32 intent,bytes32 data,bool verifySender,bytes32 nonce,bytes signature,uint256 deadline) payable",
