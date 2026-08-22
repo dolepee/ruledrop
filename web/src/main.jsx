@@ -122,7 +122,7 @@ function App() {
           <div className="action-panel">
             {wrongWallet && <div className="inline-warning">This saved run belongs to {short(session.trader)}.</div>}
             <RunStatus session={session} account={account} />
-            <button className="primary" onClick={act} disabled={busy || wrongWallet || (config && !config.enabled && !session)}>{busy ? <><LoaderCircle className="spin" /> {busyLabel(phase)}</> : <>{phaseIcon(phase)} {phaseButton(phase, account)}</>}</button>
+            <button className="primary" onClick={act} disabled={busy || wrongWallet || (config && !config.enabled && !session)}>{busy ? <><LoaderCircle className="spin" /> {busyLabel(phase)}</> : <>{phaseIcon(phase)} {phaseButton(phase, account, config?.enabled)}</>}</button>
             <small className="transaction-note">The first route is intentionally configured to revert after inclusion. Your wallet shows the exact testnet transaction before sending.</small>
             {phase === "released" && <button className="secondary" onClick={startAnother}><RefreshCw /> Clear local receipt</button>}
           </div>
@@ -147,7 +147,7 @@ function currentPhase(session) { if (!session) return "start"; if (session.relea
 function phaseIndex(phase) { return ({ start: 0, prepared: 0, failed: 1, settled: 2, released: 4 })[phase] ?? 0; }
 function phaseTitle(phase) { return ({ start: "Run the full journey from your wallet.", prepared: "Send the controlled stale route.", failed: "Refresh and finish the swap.", settled: "Release the Attestcoin credit.", released: "The retry paid for the failure." })[phase]; }
 function phaseCopy(phase) { return ({ start: "Sign a wallet challenge. The sponsor funds a small testnet reserve and prepares two tightly bound official Uniswap routes.", prepared: "The first signed route has an impossible minimum output. It must be included and fail with no settlement logs.", failed: "The second route carries a newer signed quote and realistic minimum. The same action now settles through Uniswap.", settled: "Both receipts need Sepolia finality. RetryCredit builds one native Attestcoin batch and submits the one-time release on Creditcoin.", released: "The fixed testnet credit moved from the funded pool to your wallet. The same receipts cannot release it again." })[phase]; }
-function phaseButton(phase, account) { if (!account) return "Connect wallet"; return ({ start: "Fund my testnet credit", prepared: "Send expected-failure route", failed: "Send refreshed route", settled: "Verify receipts and release", released: "Credit released" })[phase]; }
+function phaseButton(phase, account, enabled) { if (phase === "start" && enabled === false) return "Public allocation replenishing"; if (!account) return "Connect wallet"; return ({ start: "Fund my testnet credit", prepared: "Send expected-failure route", failed: "Send refreshed route", settled: "Verify receipts and release", released: "Credit released" })[phase]; }
 function busyLabel(phase) { return ({ start: "Funding and signing…", prepared: "Waiting for failure receipt…", failed: "Settling swap…", settled: "Waiting for Attestcoin…", released: "Complete" })[phase]; }
 function phaseIcon(phase) { return phase === "released" ? <Check /> : phase === "settled" ? <ShieldCheck /> : phase === "start" ? <Zap /> : <ArrowRight />; }
 
