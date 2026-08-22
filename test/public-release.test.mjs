@@ -8,8 +8,9 @@ const files = await Promise.all([
   readFile(new URL("web/src/main.jsx", root), "utf8"),
   readFile(new URL("README.md", root), "utf8"),
   readFile(new URL("render.yaml", root), "utf8"),
+  readFile(new URL("src/server.mjs", root), "utf8"),
 ]);
-const [html, app, readme, render] = files;
+const [html, app, readme, render, server] = files;
 
 test("public brand, metadata, and primary action describe one RetryCredit release", () => {
   assert.match(html, /<title>RetryCredit \| The retry pays for the failure<\/title>/);
@@ -52,7 +53,9 @@ test("public evidence links bind the exact fresh lifecycle", () => {
 test("deployment configuration is fail-closed and pins the funded pool", () => {
   assert.match(render, /RETRYCREDIT_PUBLIC_ENABLED\n\s+value: "false"/);
   assert.match(render, /RETRYCREDIT_DEMO_PRIVATE_KEY\n\s+sync: false/);
-  assert.match(render, /0x9f29325134D48602B09647B16220Ef8Af350692A/);
-  assert.match(render, /0xc89e4d598b2c62f48eeBaB371B1B7f4B459325BA/);
+  assert.match(render, /0x412980AF2Bc24A57B5eeAEe1ad8cd87f46A26553/);
+  assert.match(render, /0x2D722e01CDC5EE409eb62C048D239E6E2e033A95/);
+  assert.match(server, /0x412980AF2Bc24A57B5eeAEe1ad8cd87f46A26553/);
+  assert.match(server, /0x2D722e01CDC5EE409eb62C048D239E6E2e033A95/);
   assert.match(render, /https:\/\/retrycredit\.dolepee\.com/);
 });
