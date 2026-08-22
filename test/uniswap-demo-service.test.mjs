@@ -116,15 +116,30 @@ test("funds source gas before reserving CC3 credit and fails safely when faucet 
   assert.equal(fixture.pool.activateCalls, 0);
 });
 
-test("refuses a second sponsored demo for the same trader", async () => {
+test("resumes an existing sponsored demo for the same trader without another write", async () => {
   const fixture = serviceFixture({ existingCredits: [{ sponsor: sponsor.address, trader: trader.address }] });
   const service = makeService(fixture);
   const challenge = service.challenge(trader.address);
-  await assert.rejects(
-    service.prepare({ ...challenge, signature: await trader.signMessage(challenge.message) }),
-    (error) => error instanceof WorkerError && error.code === "DEMO_ALREADY_USED",
-  );
+  const result = await service.prepare({ ...challenge, signature: await trader.signMessage(challenge.message) });
+  assert.equal(result.serviceCreditNumber, 1);
+  assert.equal(result.trader, trader.address);
+  assert.equal(result.creationTransaction, fixture.existingCreationHash);
+  assert.equal(result.activationTransaction, fixture.existingActivationHash);
+  assert.equal(result.sourceWindow.maxBlockGap, 10);
   assert.equal(fixture.pool.createCalls, 0);
+  assert.equal(fixture.pool.activateCalls, 0);
+  assert.equal(fixture.sourceFunder.sendCalls, 0);
+});
+
+test("counts only sponsor-indexed draft events from the pinned deployment block", async () => {
+  const outsider = Wallet.createRandom();
+  const fixture = serviceFixture({ existingCredits: Array.from({ length: 25 }, () => ({ sponsor: outsider.address, trader: outsider.address })) });
+  const service = makeService(fixture);
+  const challenge = service.challenge(trader.address);
+  const result = await service.prepare({ ...challenge, signature: await trader.signMessage(challenge.message) });
+  assert.equal(result.serviceCreditNumber, 26);
+  assert.equal(fixture.pool.queryFromBlocks.every((value) => value === PUBLIC_DEMO_DEFAULTS.poolDeploymentBlock), true);
+  assert.equal(fixture.pool.createCalls, 1);
 });
 
 test("returns existing release evidence without building or sending a replay", async () => {
@@ -199,12 +214,20 @@ function serviceFixture({
   const sourceFundingHash = `0x${"51".repeat(32)}`;
   const creationHash = `0x${"52".repeat(32)}`;
   const activationHash = `0x${"53".repeat(32)}`;
+  const existingCreationHash = `0x${"56".repeat(32)}`;
+  const existingActivationHash = `0x${"57".repeat(32)}`;
+  const nextServiceCreditNumber = existingCredits.length + 1;
   const pool = {
     target: poolAddress,
     interface: poolInterface,
-    filters: { CreditReleased: () => ({}) },
+    filters: {
+      CreditReleased: (idValue) => ({ name: "CreditReleased", idValue }),
+      ServiceCreditDraftCreated: (idValue, sponsorAddress, traderAddress) => ({ name: "ServiceCreditDraftCreated", idValue, sponsorAddress, traderAddress }),
+      ServiceCreditActivated: (idValue) => ({ name: "ServiceCreditActivated", idValue }),
+    },
     createCalls: 0,
     activateCalls: 0,
+    queryFromBlocks: [],
     async serviceCreditCount() { return BigInt(existingCredits.length); },
     async getServiceCredit(idValue) {
       const existing = existingCredits[idValue - 1];
@@ -232,7 +255,7 @@ function serviceFixture({
       return {
         async wait() {
           return receiptWithEvent("ServiceCreditDraftCreated", [
-            1n,
+            BigInt(nextServiceCreditNumber),
             sponsor.address,
             terms.trader,
             parseEther("0.01"),
@@ -247,21 +270,40 @@ function serviceFixture({
       pool.activateCalls += 1;
       return {
         async wait() {
-          return receiptWithEvent("ServiceCreditActivated", [1n, activatedPolicy, `0x${"55".repeat(32)}`], activationHash, 101);
+          return receiptWithEvent("ServiceCreditActivated", [BigInt(nextServiceCreditNumber), activatedPolicy, `0x${"55".repeat(32)}`], activationHash, 101);
         },
       };
     },
-    async queryFilter() {
-      return released ? [{
+    async queryFilter(filter, fromBlock) {
+      if (filter.name === "ServiceCreditDraftCreated") {
+        pool.queryFromBlocks.push(fromBlock);
+        return existingCredits.flatMap((existing, index) => {
+          if (filter.sponsorAddress && getAddress(existing.sponsor) !== getAddress(filter.sponsorAddress)) return [];
+          if (filter.traderAddress && getAddress(existing.trader) !== getAddress(filter.traderAddress)) return [];
+          return [{
+            address: poolAddress,
+            transactionHash: existingCreationHash,
+            blockNumber: 100 + index,
+            args: { serviceCreditNumber: BigInt(index + 1), sponsor: existing.sponsor, trader: existing.trader },
+          }];
+        });
+      }
+      if (filter.name === "ServiceCreditActivated") return [{
         address: poolAddress,
-        transactionHash: releaseHash,
-        blockNumber: 120,
-        args: {
-          failureQueryId: `0x${"71".repeat(32)}`,
-          successQueryId: `0x${"72".repeat(32)}`,
-          pairId: `0x${"73".repeat(32)}`,
-        },
-      }] : [];
+        transactionHash: existingActivationHash,
+        blockNumber: 101,
+        args: { serviceCreditNumber: BigInt(filter.idValue) },
+      }];
+      return released ? [{
+          address: poolAddress,
+          transactionHash: releaseHash,
+          blockNumber: 120,
+          args: {
+            failureQueryId: `0x${"71".repeat(32)}`,
+            successQueryId: `0x${"72".repeat(32)}`,
+            pairId: `0x${"73".repeat(32)}`,
+          },
+        }] : [];
     },
   };
   const sourceFunder = {
@@ -306,6 +348,8 @@ function serviceFixture({
       async getBalance(address) { return getAddress(address) === sponsor.address ? sourceFunderBalance : 0n; },
     },
     sourceFundingHash,
+    existingCreationHash,
+    existingActivationHash,
     get createdTerms() { return createdTerms; },
   };
   return fixture;

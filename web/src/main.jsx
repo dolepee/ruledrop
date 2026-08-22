@@ -69,7 +69,7 @@ function App() {
       }
       if (!session.failedTransactionHash) {
         await ensureSepolia();
-        await waitForSourceWindow(session.sourceWindow.startBlock, setNotice);
+        await ensureRouteWindow(session, "failure", setNotice);
         const hash = await sendPrepared(session.transactions.failed);
         const receipt = await waitReceipt(hash);
         if (Number(receipt.status) !== 0) throw new Error("The controlled stale route unexpectedly succeeded; no credit can be claimed");
@@ -79,6 +79,7 @@ function App() {
       }
       if (!session.successfulTransactionHash) {
         await ensureSepolia();
+        await ensureRouteWindow(session, "success", setNotice);
         const hash = await sendPrepared(session.transactions.successful);
         const receipt = await waitReceipt(hash);
         if (Number(receipt.status) !== 1) throw new Error("The refreshed route did not settle");
@@ -159,7 +160,33 @@ async function ensureSepolia() {
   try { await window.ethereum.request({ method: "wallet_switchEthereumChain", params: [{ chainId: SEPOLIA_CHAIN_HEX }] }); }
   catch (error) { if (error.code !== 4902) throw error; await window.ethereum.request({ method: "wallet_addEthereumChain", params: [{ chainId: SEPOLIA_CHAIN_HEX, chainName: "Ethereum Sepolia", nativeCurrency: { name: "Sepolia ETH", symbol: "ETH", decimals: 18 }, rpcUrls: ["https://ethereum-sepolia-rpc.publicnode.com"], blockExplorerUrls: [SEPOLIA_EXPLORER] }] }); }
 }
-async function waitForSourceWindow(startBlock, setNotice) { const provider = new BrowserProvider(window.ethereum); for (;;) { const current = await provider.getBlockNumber(); if (current >= startBlock) return; setNotice({ tone: "success", text: `Credit funded. Waiting ${startBlock - current} Sepolia block${startBlock - current === 1 ? "" : "s"} for the precommitted window.` }); await delay(6000); } }
+async function ensureRouteWindow(session, route, setNotice) {
+  const provider = new BrowserProvider(window.ethereum);
+  const { startBlock, endBlock, maxBlockGap } = session.sourceWindow ?? {};
+  if (!Number.isSafeInteger(startBlock) || !Number.isSafeInteger(endBlock) || startBlock >= endBlock) {
+    throw new Error("This saved recovery has invalid source-window data. No transaction was sent.");
+  }
+  if (route === "success" && (!Number.isSafeInteger(session.failedBlock) || !Number.isSafeInteger(maxBlockGap) || maxBlockGap <= 0)) {
+    throw new Error("This saved recovery cannot prove a safe retry window. No transaction was sent.");
+  }
+  for (;;) {
+    const current = await provider.getBlockNumber();
+    if (current < startBlock) {
+      setNotice({ tone: "success", text: `Credit funded. Waiting ${startBlock - current} Sepolia block${startBlock - current === 1 ? "" : "s"} for the precommitted window.` });
+      await delay(6000);
+      continue;
+    }
+    const finalBlock = route === "success"
+      ? Math.min(endBlock, session.failedBlock + maxBlockGap)
+      : endBlock;
+    if (current >= finalBlock) {
+      throw new Error(route === "success"
+        ? "The retry window expired before settlement. No transaction was sent."
+        : "The recovery window expired before the stale route. No transaction was sent.");
+    }
+    return;
+  }
+}
 async function sendPrepared(transaction) { return window.ethereum.request({ method: "eth_sendTransaction", params: [{ from: transaction.from, to: transaction.to, data: transaction.data, value: transaction.value, gas: transaction.gas }] }); }
 async function waitReceipt(hash) { return new BrowserProvider(window.ethereum).waitForTransaction(hash, 1, 180_000); }
 async function releaseUntilReady(session) { const deadline = Date.now() + 15 * 60_000; while (Date.now() < deadline) { const response = await fetch(`/api/retry-credit/${session.serviceCreditNumber}/release`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ failedTransactionHash: session.failedTransactionHash, successfulTransactionHash: session.successfulTransactionHash }) }); const data = await response.json(); if (response.ok) return data; if (response.status !== 425) throw new Error(data.error?.message ?? "Credit release failed"); await delay(15_000); } throw new Error("Attestcoin is still finalizing. Your receipt is saved; return and retry release shortly."); }

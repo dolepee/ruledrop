@@ -2,6 +2,7 @@ import {
   AbiCoder,
   Contract,
   Interface,
+  MaxUint256,
   Wallet,
   ZeroAddress,
   concat,
@@ -34,6 +35,7 @@ export const PUBLIC_DEMO_DEFAULTS = Object.freeze({
   maxBlockGap: 10,
   refundDelaySeconds: 4 * 60 * 60,
   maxSponsoredCredits: 10,
+  poolDeploymentBlock: 5_352_892,
   challengeWindowMs: 5 * 60_000,
 });
 
@@ -266,19 +268,12 @@ export class UniswapRetryCreditDemoService {
 
   async #prepareAuthenticated(trader) {
     await this.#authenticateInfrastructure();
-    const count = Number(await this.pool.serviceCreditCount());
-    let sponsoredCount = 0;
-    for (let idValue = 1; idValue <= count; idValue += 1) {
-      const [credit, rule] = await Promise.all([
-        this.pool.getServiceCredit(idValue),
-        this.pool.getRule(idValue),
-      ]);
-      if (getAddress(credit.sponsor) !== this.sponsorWallet.address) continue;
-      sponsoredCount += 1;
-      if (getAddress(rule.trader) === trader) {
-        throw new WorkerError("DEMO_ALREADY_USED", "This wallet already has a RetryCredit demo", 409);
-      }
-    }
+    const existing = await this.#sponsoredDraftEvents(trader);
+    if (existing.length > 1) throw new WorkerError("DEMO_STATE_INVALID", "Multiple sponsored recoveries exist for this wallet", 503);
+    if (existing.length === 1) return this.#resumeSponsoredRun(existing[0], trader);
+
+    const sponsored = await this.#sponsoredDraftEvents();
+    const sponsoredCount = sponsored.length;
     if (sponsoredCount >= this.config.maxSponsoredCredits) {
       throw new WorkerError("DEMO_CAP_REACHED", "The bounded public demo allocation has been used", 409);
     }
@@ -302,7 +297,7 @@ export class UniswapRetryCreditDemoService {
     const endBlock = startBlock + this.config.sourceWindowBlocks;
     const actionId = keccak256(abiCoder.encode(
       ["string", "address", "address", "uint256", "uint256"],
-      ["RETRYCREDIT_PUBLIC_ACTION_V1", trader, this.poolAddress, count + 1, ccBlock.number],
+      ["RETRYCREDIT_PUBLIC_ACTION_V1", trader, this.poolAddress, sponsoredCount + 1, ccBlock.number],
     ));
     const terms = {
       routeSigner: this.routeSignerWallet.address,
@@ -345,27 +340,97 @@ export class UniswapRetryCreditDemoService {
     requireExactEvent(this.pool.interface, activationReceipt, "ServiceCreditActivated", this.poolAddress);
     const rule = await this.pool.getRule(serviceCreditNumber);
 
-    const routeBundle = await this.#signedRouteBundle(rule, quote);
+    return this.#preparedResponse({
+      serviceCreditNumber,
+      trader,
+      sourceFundingTransaction,
+      creationTransaction: creationReceipt.hash,
+      activationTransaction: activationReceipt.hash,
+      rule,
+    });
+  }
+
+  async #sponsoredDraftEvents(trader = null) {
+    const filter = this.pool.filters.ServiceCreditDraftCreated(
+      null,
+      this.sponsorWallet.address,
+      trader,
+    );
+    const events = await this.pool.queryFilter(filter, this.config.poolDeploymentBlock);
+    return events.filter((event) => (
+      getAddress(event.address) === this.poolAddress
+      && getAddress(event.args.sponsor) === this.sponsorWallet.address
+      && (!trader || getAddress(event.args.trader) === trader)
+    ));
+  }
+
+  async #resumeSponsoredRun(event, trader) {
+    const serviceCreditNumber = Number(event.args.serviceCreditNumber);
+    const credit = await this.pool.getServiceCredit(serviceCreditNumber);
+    if (getAddress(credit.sponsor) !== this.sponsorWallet.address || getAddress(event.args.trader) !== trader) {
+      throw new WorkerError("DEMO_STATE_INVALID", "The saved recovery does not match this wallet", 503);
+    }
+    if (credit.released || credit.refunded) {
+      throw new WorkerError("DEMO_ALREADY_USED", "This wallet already completed or closed its sponsored recovery", 409);
+    }
+    let rule = await this.pool.getRule(serviceCreditNumber);
+    let activationTransaction = null;
+    if (rule.policyId === ZERO_BYTES32) {
+      await waitForNextBlock(this.ccProvider, Number(credit.creationBlock));
+      try {
+        const activation = await this.pool.activateServiceCredit(serviceCreditNumber);
+        const activationReceipt = await activation.wait();
+        requireExactEvent(this.pool.interface, activationReceipt, "ServiceCreditActivated", this.poolAddress);
+        activationTransaction = activationReceipt.hash;
+        rule = await this.pool.getRule(serviceCreditNumber);
+      } catch (error) {
+        rule = await this.pool.getRule(serviceCreditNumber);
+        if (rule.policyId === ZERO_BYTES32) throw error;
+      }
+    }
+    if (!activationTransaction) {
+      const activations = await this.pool.queryFilter(
+        this.pool.filters.ServiceCreditActivated(serviceCreditNumber),
+        Number(credit.creationBlock),
+      );
+      const exact = activations.filter((item) => getAddress(item.address) === this.poolAddress);
+      if (exact.length !== 1) throw new WorkerError("DEMO_STATE_INVALID", "Exact activation evidence is unavailable", 503);
+      activationTransaction = exact[0].transactionHash;
+    }
+    return this.#preparedResponse({
+      serviceCreditNumber,
+      trader,
+      sourceFundingTransaction: null,
+      creationTransaction: event.transactionHash,
+      activationTransaction,
+      rule,
+    });
+  }
+
+  async #preparedResponse({ serviceCreditNumber, trader, sourceFundingTransaction, creationTransaction, activationTransaction, rule }) {
     return {
       serviceCreditNumber,
       trader,
       creditAmount: this.config.creditAmount.toString(),
       sourceFundingTransaction,
-      creationTransaction: creationReceipt.hash,
-      activationTransaction: activationReceipt.hash,
+      creationTransaction,
+      activationTransaction,
       policyId: String(rule.policyId).toLowerCase(),
-      actionId,
-      sourceWindow: { startBlock, endBlock },
-      quote: quote.toString(),
-      transactions: routeBundle,
+      actionId: String(rule.actionId).toLowerCase(),
+      sourceWindow: {
+        startBlock: Number(rule.startBlock),
+        endBlock: Number(rule.endBlock),
+        maxBlockGap: Number(rule.maxBlockGap),
+      },
+      transactions: await this.#signedRouteBundle(rule),
     };
   }
 
-  async #signedRouteBundle(rule, quote) {
+  async #signedRouteBundle(rule) {
     const intent = computeUniswapRetryCreditIntent(rule);
     const now = Math.floor(Date.now() / 1000);
-    const failureMinimum = quote * 2n;
-    const successMinimum = quote * 90n / 100n;
+    const failureMinimum = MaxUint256;
+    const successMinimum = BigInt(rule.minimumSuccessfulOut);
     return {
       failed: await this.#signedRouteTransaction({
         rule,
