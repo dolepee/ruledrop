@@ -53,9 +53,9 @@ test("public evidence links bind the exact fresh lifecycle", () => {
 test("deployment configuration is fail-closed and pins the funded pool", () => {
   assert.match(render, /RETRYCREDIT_PUBLIC_ENABLED\n\s+value: "false"/);
   assert.match(render, /RETRYCREDIT_DEMO_PRIVATE_KEY\n\s+sync: false/);
-  assert.match(render, /0x412980AF2Bc24A57B5eeAEe1ad8cd87f46A26553/);
-  assert.match(render, /0x2D722e01CDC5EE409eb62C048D239E6E2e033A95/);
-  assert.match(server, /0x412980AF2Bc24A57B5eeAEe1ad8cd87f46A26553/);
-  assert.match(server, /0x2D722e01CDC5EE409eb62C048D239E6E2e033A95/);
+  assert.match(render, /0x81b5d955F4EbfaE02FF6346cf368A2c4347248A1/);
+  assert.match(render, /0x97Fa88CfCaeE1a5D4Ae749b9b5698F2147b986fC/);
+  assert.match(server, /0x81b5d955F4EbfaE02FF6346cf368A2c4347248A1/);
+  assert.match(server, /0x97Fa88CfCaeE1a5D4Ae749b9b5698F2147b986fC/);
   assert.match(render, /https:\/\/retrycredit\.dolepee\.com/);
 });
