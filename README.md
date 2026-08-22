@@ -1,64 +1,71 @@
-# RuleDrop
+# RetryCredit
 
-**Rules, not lists.**
+**The retry pays for the failure.**
 
-Live application: [ruledrop.dolepee.com](https://ruledrop.dolepee.com)
+RetryCredit is a pre-funded execution credit for signed DeFi routes. A trader submits an authorized Uniswap route that is included and fails, then settles the same funded action with a refreshed signed route. One native Attestcoin batch proves both Ethereum receipts before Creditcoin releases the fixed service credit exactly once.
 
-RuleDrop turns verified Ethereum mainnet history into open, funded claims on Creditcoin. A protocol, DAO, or merchant funds an immutable obligation; any wallet that proves the exact historical action through Attestcoin can establish its own inclusion and withdraw after finalization.
+The current public pilot is deliberately narrow:
 
-The current live V1 deployment supports one deliberately narrow predicate: a direct, successful Ethereum mainnet USDC `transfer(address,uint256)` to an exact recipient, above an exact amount, inside an immutable historical block range.
-
-The repository's V2 implementation expands the same engine for compensation, rebates, and recovery grants with:
-
-- Reviewed direct-transfer and contract-interaction claim templates.
-- Exact target, selector, event emitter, event signature, and claimant-topic binding.
-- Equal and capped source-amount-weighted pro-rata settlement.
-- A version-aware worker that preserves the live V1 path until V2 is separately deployed and verified.
-
-V2 source code is not presented as live deployment evidence. See [product direction](docs/PRODUCT_DIRECTION_2026-08-14.md) and [deployment evidence](docs/DEPLOYMENTS.md).
+- Ethereum Sepolia source chain and Creditcoin Testnet settlement.
+- Official Uniswap Universal Router 2.1.1.
+- One WETH → Circle test-USDC fee-500 route.
+- One bounded sponsor-funded credit per visitor wallet.
+- Test assets only; no mainnet value, insurance, or exact gas reimbursement.
 
 ## Why Attestcoin is load-bearing
 
-Without Attestcoin, a sponsor or indexer must author the eligibility list. RuleDrop instead verifies claimant-supplied Ethereum evidence through Creditcoin's native verifier and independently checks receipt success, transaction sender and target, canonical calldata, USDC event origin, recipient, amount, block range, and replay state.
+The Creditcoin release requires one native Attestcoin batch containing both ordered source receipts. The verifier enforces:
 
-The proof builder is untrusted for integrity. It can delay a claim, but it cannot approve one.
+1. The same trader, funded action, official router, input amount, and signed intent.
+2. A status-0 receipt followed by a status-1 receipt in a bounded source window.
+3. A newer route nonce, quote marker, deadline, and improved minimum output.
+4. One exact Uniswap pool `Swap` and one exact Circle test-USDC transfer to the trader.
+5. One-time query, pair, action, and service-credit consumption.
 
-## Live feasibility evidence
+Remove Attestcoin and the Creditcoin pool cannot authorize the release. The proof builder is not trusted for integrity: every candidate batch is checked locally and then simulated against the exact funded pool before the relayer may submit it.
 
-On August 13, 2026, Creditcoin testnet chain `102031` reported:
+## Public evidence
 
-- Ethereum mainnet at source chain key `3`
-- Latest attested Ethereum block `25,747,630`
-- A valid proof for historical mainnet transaction `0x7e6c853f85d4db4040206d7d49e1327b009894f7f0b8cba7c5c1fab640bd1227`
-- Native `0x0FD2` verification succeeded in `896 ms`
-- The same proof registered its historical sender in live campaign `1` through Creditcoin transaction `0x6470d1850b4444a0627cc997bacc982af8757bb2682bf272422e0100f871de5e`
+A fresh direct-Uniswap lifecycle completed on August 22, 2026:
 
-The source transaction predates RuleDrop and directly transferred canonical Ethereum USDC from the claimant wallet. Its live Creditcoin receipt contains both the native verifier event and RuleDrop's `ClaimRegistered` event.
+- Included status-0 route: [`0x5ef2…3722`](https://sepolia.etherscan.io/tx/0x5ef2e6e47da2892774967c69aa48814d4db08141d76e53418ad7886d67683722)
+- Next-block settled retry: [`0xb6f5…766b`](https://sepolia.etherscan.io/tx/0xb6f516f52d0286bf274ae63a000df67583250c13d3645e6ce5e80ae40716766b)
+- Creditcoin release: [`0xbc44…0e84`](https://creditcoin-testnet.blockscout.com/tx/0xbc44875c384fa4a9a67a7cdfd390d2322db84570c60e54fe65fed1e0b7a40e84)
+- Source-to-credit time: 477 seconds.
 
-The RuleDrop contracts and two fully funded `10 tCTC` campaigns are live on Creditcoin testnet. Campaign `1` preserves the completed proof evidence; campaign `2` keeps the public claim surface open through October 2026. See [deployment evidence](docs/DEPLOYMENTS.md) for contract addresses, transaction hashes, and the exact campaign rule.
+A separate cold visitor run used only the public HTTP surface and a disposable wallet:
+
+- Included status-0 route: [`0x06b4…90a2`](https://sepolia.etherscan.io/tx/0x06b4c1df16a075587fcd1192090afa05200e55e8c3e8c0f3728b446d1dbc90a2)
+- Next-block settled retry: [`0xffbd…0c7b`](https://sepolia.etherscan.io/tx/0xffbd4b44f5fc22949cf0ac8829da7dc4b0cf7bb8a3d9ae483811ff903d710c7b)
+- Creditcoin release: [`0x00f0…f56b0`](https://creditcoin-testnet.blockscout.com/tx/0x00f033e14dc4c6583f17dc0571f463b89ffa7f53519d467c2f54bc01249f56b0)
+
+Both executions used test assets and founder-funded service credits. They prove engineering and public-chain causality, not customer demand.
 
 ## Contracts
 
-- `RuleDropPool`: fully funded immutable claims, versioned templates, pro-rata settlement policies, permissionless finalization, and pull withdrawals.
-- `AttestcoinClaimVerifier`: native proof verification and source transaction replay identity.
-- `USDCTransferPredicateV1`: exact direct-USDC transfer semantics.
-- `ContractInteractionPredicateV1`: exact direct contract call and claimant-bound event semantics.
+- `RetryCreditUniversalRouterPool`: pre-funded drafts, blockhash-derived activation, fixed release, refunds, and replay consumption.
+- `AttestcoinUniswapRetryVerifier`: native batch verification and source identity derivation.
+- `RetryCreditUniversalRouterPredicateV1`: canonical signed-router decoding, retry correlation, receipt ordering, and exact settlement evidence.
+- `EvmV1Decoder`: strict Attestcoin EVM receipt decoding.
 
-## Application worker
+The previous RuleDrop contracts remain in the repository as an archived proof-engine predecessor. They are not the current product or public release claim.
 
-The Node worker reads live campaign state, uses fallback Ethereum RPCs for early validation, retries and caches Attestcoin proofs, and returns claim calldata only after the exact onchain call simulates successfully. See [the worker API](docs/WORKER_API.md).
+## Public service
 
-The application and worker run as one Docker service on Render behind the stable `ruledrop.dolepee.com` hostname. `/health` exposes destination-network identity for provider monitoring.
+The Node service authenticates one short-lived wallet challenge, funds bounded Sepolia gas before reserving a Creditcoin credit, signs two official Universal Router routes without custody of the visitor wallet, waits for Attestcoin finality, simulates the exact release, and submits through an isolated relayer. Public transaction state is saved in the visitor's browser; durable authorization and replay state remain onchain.
+
+Public sponsorship is capped per deployment and fails closed when the faucet or reserve is unavailable.
 
 ## Local verification
 
 ```bash
 npm install
-forge test
 npm test
-npm run verify:mainnet-gate
+npm run build
 ```
 
-## Claim boundaries
+The repository currently covers 55 Foundry tests and 162 Node tests, including malformed proofs, route mutations, source identity drift, replay, unauthenticated infrastructure, wallet ownership, faucet ordering, and sponsor/relayer separation.
 
-RuleDrop proves qualifying wallets, not unique humans. The hackathon deployment is testnet-only, unaudited, and does not claim general Sybil resistance.
+## Truth boundary
+
+Attestcoin proves an authorized included failure and a later exact settlement. It does **not** prove the human-readable revert reason, organic user loss, exact gas expenditure, or an insurance event. The first route in this pilot is a disclosed controlled stale-route test.

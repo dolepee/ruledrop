@@ -1,7 +1,7 @@
 {
-  "name": "ruledrop",
+  "name": "retrycredit",
   "version": "1.0.0",
-  "description": "Open cross-chain claims settlement on Creditcoin using Attestcoin",
+  "description": "Attestcoin-verified execution credits for failed then settled DeFi routes",
   "main": "index.js",
   "scripts": {
     "test": "forge test && node --test",
