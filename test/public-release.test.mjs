@@ -14,6 +14,8 @@ const [html, app, readme, render] = files;
 test("public brand, metadata, and primary action describe one RetryCredit release", () => {
   assert.match(html, /<title>RetryCredit \| The retry pays for the failure<\/title>/);
   assert.match(html, /https:\/\/ruledrop\.dolepee\.com\/retrycredit-og-v1\.png/);
+  assert.match(html, /https:\/\/github\.com\/dolepee\/retrycredit/);
+  assert.doesNotMatch(html, /github\.com\/dolepee\/ruledrop/);
   assert.doesNotMatch(html, /RuleDrop/);
   assert.match(app, /Finish the swap/);
   assert.match(app, /PUBLIC PRIMARY ACTION/);

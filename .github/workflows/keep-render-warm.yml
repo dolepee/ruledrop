@@ -13,5 +13,5 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
-      - name: Check RuleDrop health
+      - name: Check RetryCredit health
         run: curl --fail --silent --show-error --retry 3 --max-time 25 https://ruledrop.dolepee.com/health
