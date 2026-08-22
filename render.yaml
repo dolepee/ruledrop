@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: ruledrop
+    name: retrycredit
     runtime: docker
     plan: free
     healthCheckPath: /health
@@ -10,7 +10,19 @@ services:
       - key: PORT
         value: 4179
       - key: ALLOWED_ORIGIN
-        value: https://ruledrop.dolepee.com
+        value: https://retrycredit.dolepee.com
+      - key: PUBLIC_ORIGIN
+        value: https://retrycredit.dolepee.com
+      - key: RETRYCREDIT_PUBLIC_ENABLED
+        value: "false"
+      - key: RETRYCREDIT_DEMO_PRIVATE_KEY
+        sync: false
+      - key: RETRYCREDIT_POOL_ADDRESS
+        value: 0x9f29325134D48602B09647B16220Ef8Af350692A
+      - key: RETRYCREDIT_VERIFIER_ADDRESS
+        value: 0xc89e4d598b2c62f48eeBaB371B1B7f4B459325BA
+      - key: SEPOLIA_RPC_URL
+        value: https://ethereum-sepolia-rpc.publicnode.com
       - key: RULEDROP_POOL_ADDRESS
         value: 0x6f8dE7e1599A0c8D38eB25996cB841a4920ed999
       - key: CREDITCOIN_RPC
