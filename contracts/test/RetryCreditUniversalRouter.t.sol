@@ -4,14 +4,17 @@ pragma solidity ^0.8.23;
 import {Test} from "forge-std/Test.sol";
 import {EvmV1Decoder} from "@gluwa/usc-contracts/contracts/decoding/EvmV1Decoder.sol";
 import {AttestcoinRetryCreditUniversalRouterVerifier} from "../src/AttestcoinRetryCreditUniversalRouterVerifier.sol";
+import {RetryCreditUniversalRouterPool} from "../src/RetryCreditUniversalRouterPool.sol";
 import {RetryCreditUniversalRouterPredicateV1} from "../src/RetryCreditUniversalRouterPredicateV1.sol";
 import {INativeQueryVerifier} from "../src/interfaces/INativeQueryVerifier.sol";
+import {MockChainInfo} from "./mocks/MockChainInfo.sol";
 import {MockNativeQueryVerifier} from "./mocks/MockNativeQueryVerifier.sol";
 
 contract RetryCreditUniversalRouterTest is Test {
     uint256 private constant ROUTE_SIGNER_KEY = 0xA11CE;
     uint256 private constant TRADER_KEY = 0xB0B;
     uint256 private constant OUTSIDER_KEY = 0xBAD;
+    uint256 private constant SPONSOR_KEY = 0xC0FFEE;
 
     uint64 private constant SOURCE_CHAIN_KEY = 1;
     uint64 private constant SOURCE_CHAIN_ID = 11_155_111;
@@ -30,6 +33,7 @@ contract RetryCreditUniversalRouterTest is Test {
     uint256 private constant SUCCESS_MIN_OUT = 2_156_464;
     uint256 private constant ACTUAL_OUT = 2_269_963;
     uint256 private constant MINIMUM_SUCCESSFUL_OUT = 2_000_000;
+    uint256 private constant CREDIT_AMOUNT = 0.1 ether;
     uint256 private constant FAILURE_DEADLINE = 1_800_000_000;
     uint256 private constant SUCCESS_DEADLINE = FAILURE_DEADLINE + 60;
 
@@ -42,6 +46,7 @@ contract RetryCreditUniversalRouterTest is Test {
     bytes32 private constant ACTION_ID = keccak256("one-weth-usdc-swap-intent");
     bytes32 private constant FAILURE_ROUTE_NONCE = keccak256("failed-route-nonce");
     bytes32 private constant SUCCESS_ROUTE_NONCE = keccak256("refreshed-route-nonce");
+    bytes32 private constant CREATION_BLOCK_HASH = keccak256("uniswap-credit-creation-block");
 
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
@@ -85,19 +90,130 @@ contract RetryCreditUniversalRouterTest is Test {
 
     address private routeSigner;
     address private trader;
+    address private sponsor;
+    address private prover;
     RetryCreditUniversalRouterPredicateV1 private predicate;
     MockNativeQueryVerifier private nativeVerifier;
     AttestcoinRetryCreditUniversalRouterVerifier private batchVerifier;
+    MockChainInfo private chainInfo;
+    RetryCreditUniversalRouterPool private servicePool;
 
     function setUp() external {
         vm.chainId(SOURCE_CHAIN_ID);
         routeSigner = vm.addr(ROUTE_SIGNER_KEY);
         trader = vm.addr(TRADER_KEY);
+        sponsor = vm.addr(SPONSOR_KEY);
+        prover = address(0xC0DE);
         predicate = new RetryCreditUniversalRouterPredicateV1();
         nativeVerifier = new MockNativeQueryVerifier();
         batchVerifier = new AttestcoinRetryCreditUniversalRouterVerifier(
             predicate, address(nativeVerifier), SOURCE_CHAIN_KEY, SOURCE_CHAIN_ID
         );
+        chainInfo = new MockChainInfo(START_BLOCK - 1);
+        chainInfo.setSource(SOURCE_CHAIN_KEY, SOURCE_CHAIN_ID, 1, true);
+        servicePool = new RetryCreditUniversalRouterPool(batchVerifier, address(chainInfo));
+        vm.deal(sponsor, 10 ether);
+        vm.deal(trader, 1 ether);
+        vm.deal(prover, 1 ether);
+    }
+
+    function testFundedPoolActivatesReleasesOnceAndConsumesBatchIdentity() external {
+        (uint256 serviceCreditNumber, bytes32 policyId) = _createAndActivateServiceCredit();
+        RetryCreditUniversalRouterPredicateV1.Rule memory activeRule = servicePool.getRule(serviceCreditNumber);
+        AttestcoinRetryCreditUniversalRouterVerifier.BatchProof memory proof = _validProofForRule(activeRule);
+        nativeVerifier.setTransactionIndexForRoot(proof.merkleProofs[0].root, 7);
+        nativeVerifier.setTransactionIndexForRoot(proof.merkleProofs[1].root, 11);
+
+        uint256 traderBefore = trader.balance;
+        vm.prank(prover);
+        servicePool.releaseCredit(serviceCreditNumber, proof);
+
+        assertEq(trader.balance - traderBefore, CREDIT_AMOUNT);
+        assertEq(address(servicePool).balance, 0);
+        RetryCreditUniversalRouterPool.ServiceCredit memory credit = servicePool.getServiceCredit(serviceCreditNumber);
+        assertTrue(credit.released);
+        assertFalse(credit.refunded);
+
+        bytes32 failureQueryId = keccak256(abi.encode(SOURCE_CHAIN_KEY, FAILURE_BLOCK, uint64(7)));
+        bytes32 successQueryId = keccak256(abi.encode(SOURCE_CHAIN_KEY, SUCCESS_BLOCK, uint64(11)));
+        bytes32 pairId = keccak256(abi.encode(policyId, ACTION_ID, failureQueryId, successQueryId));
+        bytes32 actionKey = keccak256(abi.encode(SOURCE_CHAIN_KEY, SOURCE_CHAIN_ID, ROUTER, trader, ACTION_ID));
+        assertTrue(servicePool.consumedQueries(failureQueryId));
+        assertTrue(servicePool.consumedQueries(successQueryId));
+        assertTrue(servicePool.consumedPairs(pairId));
+        assertTrue(servicePool.consumedActions(actionKey));
+
+        vm.expectRevert(RetryCreditUniversalRouterPool.AlreadyResolved.selector);
+        vm.prank(prover);
+        servicePool.releaseCredit(serviceCreditNumber, proof);
+    }
+
+    function testFundedPoolPolicyIsDerivedAfterDraftAndBoundIntoRoute() external {
+        RetryCreditUniversalRouterPredicateV1.Rule memory terms = _terms();
+        vm.prank(sponsor);
+        uint256 serviceCreditNumber =
+            servicePool.createServiceCredit{value: CREDIT_AMOUNT}(terms, uint64(block.timestamp + 7 days));
+        RetryCreditUniversalRouterPool.ServiceCredit memory draft = servicePool.getServiceCredit(serviceCreditNumber);
+
+        vm.expectRevert(RetryCreditUniversalRouterPool.ActivationNotReady.selector);
+        vm.prank(sponsor);
+        servicePool.activateServiceCredit(serviceCreditNumber);
+
+        vm.roll(draft.creationBlock + 1);
+        vm.setBlockhash(draft.creationBlock, CREATION_BLOCK_HASH);
+        vm.prank(sponsor);
+        bytes32 policyId = servicePool.activateServiceCredit(serviceCreditNumber);
+
+        bytes32 expected = keccak256(
+            abi.encode(
+                "RETRYCREDIT_UNISWAP_SERVICE_CREDIT_V1",
+                block.chainid,
+                address(servicePool),
+                serviceCreditNumber,
+                sponsor,
+                CREDIT_AMOUNT,
+                draft.refundAfter,
+                draft.termsHash,
+                CREATION_BLOCK_HASH
+            )
+        );
+        assertEq(policyId, expected);
+        assertEq(servicePool.getRule(serviceCreditNumber).policyId, expected);
+        assertEq(
+            predicate.routeIntent(servicePool.getRule(serviceCreditNumber)),
+            predicate.routeIntent(_ruleWithPolicy(expected))
+        );
+    }
+
+    function testFundedPoolRejectsRetroactiveWindowAndUnsafeRefund() external {
+        RetryCreditUniversalRouterPredicateV1.Rule memory terms = _terms();
+        chainInfo.setLatest(terms.startBlock, true);
+        vm.expectRevert(RetryCreditUniversalRouterPool.SourceWindowNotAttested.selector);
+        vm.prank(sponsor);
+        servicePool.createServiceCredit{value: CREDIT_AMOUNT}(terms, uint64(block.timestamp + 7 days));
+
+        chainInfo.setLatest(terms.startBlock - 1, true);
+        vm.prank(sponsor);
+        uint256 serviceCreditNumber =
+            servicePool.createServiceCredit{value: CREDIT_AMOUNT}(terms, uint64(block.timestamp + 7 days));
+        RetryCreditUniversalRouterPool.ServiceCredit memory draft = servicePool.getServiceCredit(serviceCreditNumber);
+        vm.roll(draft.creationBlock + 1);
+        vm.setBlockhash(draft.creationBlock, CREATION_BLOCK_HASH);
+        vm.prank(sponsor);
+        servicePool.activateServiceCredit(serviceCreditNumber);
+
+        vm.warp(draft.refundAfter + 1);
+        chainInfo.setLatest(terms.endBlock - 1, true);
+        vm.expectRevert(RetryCreditUniversalRouterPool.SourceWindowNotAttested.selector);
+        vm.prank(sponsor);
+        servicePool.refundServiceCredit(serviceCreditNumber);
+
+        chainInfo.setLatest(terms.endBlock, true);
+        uint256 sponsorBefore = sponsor.balance;
+        vm.prank(sponsor);
+        servicePool.refundServiceCredit(serviceCreditNumber);
+        assertEq(sponsor.balance - sponsorBefore, CREDIT_AMOUNT);
+        assertTrue(servicePool.getServiceCredit(serviceCreditNumber).refunded);
     }
 
     function testValidOfficialRouterRetryFitsOneNativeAttestcoinBatch() external {
@@ -643,6 +759,18 @@ contract RetryCreditUniversalRouterTest is Test {
     }
 
     function _rule() private view returns (RetryCreditUniversalRouterPredicateV1.Rule memory rule) {
+        return _ruleWithPolicy(POLICY_ID);
+    }
+
+    function _terms() private view returns (RetryCreditUniversalRouterPredicateV1.Rule memory rule) {
+        return _ruleWithPolicy(bytes32(0));
+    }
+
+    function _ruleWithPolicy(bytes32 policyId)
+        private
+        view
+        returns (RetryCreditUniversalRouterPredicateV1.Rule memory rule)
+    {
         rule = RetryCreditUniversalRouterPredicateV1.Rule({
             routeSigner: routeSigner,
             trader: trader,
@@ -650,7 +778,7 @@ contract RetryCreditUniversalRouterTest is Test {
             weth: WETH,
             usdc: USDC,
             pool: POOL,
-            policyId: POLICY_ID,
+            policyId: policyId,
             actionId: ACTION_ID,
             amountIn: AMOUNT_IN,
             minimumSuccessfulOut: MINIMUM_SUCCESSFUL_OUT,
@@ -663,6 +791,14 @@ contract RetryCreditUniversalRouterTest is Test {
     }
 
     function _route(bool successful) private view returns (RouteSpec memory route) {
+        return _routeForRule(successful, _rule());
+    }
+
+    function _routeForRule(bool successful, RetryCreditUniversalRouterPredicateV1.Rule memory rule)
+        private
+        view
+        returns (RouteSpec memory route)
+    {
         route.commands = hex"0b00";
         route.wrapRecipient = address(2);
         route.wrapAmount = AMOUNT_IN;
@@ -672,7 +808,7 @@ contract RetryCreditUniversalRouterTest is Test {
         route.path = abi.encodePacked(WETH, bytes3(uint24(500)), USDC);
         route.payerIsUser = false;
         route.minHopPriceX36 = new uint256[](0);
-        route.intent = predicate.routeIntent(_rule());
+        route.intent = predicate.routeIntent(rule);
         route.data = successful ? bytes32(uint256(2)) : bytes32(uint256(1));
         route.verifySender = true;
         route.nonce = successful ? SUCCESS_ROUTE_NONCE : FAILURE_ROUTE_NONCE;
@@ -738,8 +874,16 @@ contract RetryCreditUniversalRouterTest is Test {
     }
 
     function _validProof() private view returns (AttestcoinRetryCreditUniversalRouterVerifier.BatchProof memory proof) {
+        return _validProofForRule(_rule());
+    }
+
+    function _validProofForRule(RetryCreditUniversalRouterPredicateV1.Rule memory rule)
+        private
+        view
+        returns (AttestcoinRetryCreditUniversalRouterVerifier.BatchProof memory proof)
+    {
         bytes memory failed = _encodedAttempt(
-            _signedCalldata(_route(false)),
+            _signedCalldata(_routeForRule(false, rule)),
             FAILURE_TRANSACTION_NONCE,
             trader,
             ROUTER,
@@ -748,7 +892,7 @@ contract RetryCreditUniversalRouterTest is Test {
             _failedReceipt()
         );
         bytes memory succeeded = _encodedAttempt(
-            _signedCalldata(_route(true)),
+            _signedCalldata(_routeForRule(true, rule)),
             SUCCESS_TRANSACTION_NONCE,
             trader,
             ROUTER,
@@ -767,6 +911,17 @@ contract RetryCreditUniversalRouterTest is Test {
         proof.merkleProofs[1] = _merkleProof(keccak256(succeeded));
         proof.lowerEndpointDigest = bytes32(uint256(1));
         proof.continuityRoots = new bytes32[](0);
+    }
+
+    function _createAndActivateServiceCredit() private returns (uint256 serviceCreditNumber, bytes32 policyId) {
+        vm.prank(sponsor);
+        serviceCreditNumber =
+            servicePool.createServiceCredit{value: CREDIT_AMOUNT}(_terms(), uint64(block.timestamp + 7 days));
+        RetryCreditUniversalRouterPool.ServiceCredit memory draft = servicePool.getServiceCredit(serviceCreditNumber);
+        vm.roll(draft.creationBlock + 1);
+        vm.setBlockhash(draft.creationBlock, CREATION_BLOCK_HASH);
+        vm.prank(sponsor);
+        policyId = servicePool.activateServiceCredit(serviceCreditNumber);
     }
 
     function _merkleProof(bytes32 root) private pure returns (INativeQueryVerifier.MerkleProof memory proof) {

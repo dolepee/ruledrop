@@ -49,6 +49,10 @@ const ACTION_ID = keccak256(Buffer.from("retrycredit-uniswap-action"));
 const FAILED_HASH = `0x${"a1".repeat(32)}`;
 const SUCCESS_HASH = `0x${"b2".repeat(32)}`;
 const POOL_ADDRESS = "0x4444444444444444444444444444444444444444";
+const UNISWAP_RETRY_CREDIT_POOL = "0x5555555555555555555555555555555555555555";
+const UNISWAP_RETRY_CREDIT_VERIFIER = "0x6666666666666666666666666666666666666666";
+const UNISWAP_RETRY_CREDIT_PREDICATE = "0x7777777777777777777777777777777777777777";
+const RELAYER = "0x8888888888888888888888888888888888888888";
 const AMOUNT_IN = 1_000_000_000_000_000n;
 const FAILED_MINIMUM_OUT = 3_000_000n;
 const SUCCESS_MINIMUM_OUT = 2_000_000n;
@@ -79,13 +83,7 @@ test("normalizes, validates, freezes, and caches a direct-Uniswap Attestcoin bat
   let builderCalls = 0;
   const proof = uniswapBatchFixture();
   const rule = uniswapRuleFixture();
-  const worker = new RuleDropWorker({
-    poolAddress: POOL_ADDRESS,
-    poolAbi: ["function campaignCount() view returns (uint256)"],
-    poolContract: {},
-    creditcoinProvider: {},
-    sourceChainKey: RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey,
-    sourceChainId: RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId,
+  const worker = makeUniswapWorker({
     proofBuilder: {
       async getBatchProof(hashes) {
         builderCalls += 1;
@@ -98,12 +96,12 @@ test("normalizes, validates, freezes, and caches a direct-Uniswap Attestcoin bat
   const first = await worker.getUniswapRetryCreditBatchProof({
     failedTransactionHash: FAILED_HASH,
     successfulTransactionHash: SUCCESS_HASH,
-    rule,
+    serviceCreditNumber: 1,
   });
   const second = await worker.getUniswapRetryCreditBatchProof({
     failedTransactionHash: FAILED_HASH,
     successfulTransactionHash: SUCCESS_HASH,
-    rule,
+    serviceCreditNumber: 1,
   });
 
   assert.equal(first, second);
@@ -343,13 +341,10 @@ test("rejects signed-route, intent, refresh, ordering, and settlement mutations"
 
 test("binds the batch builder cache to the full funded rule", async () => {
   let calls = 0;
-  const worker = new RuleDropWorker({
-    poolAddress: POOL_ADDRESS,
-    poolAbi: ["function campaignCount() view returns (uint256)"],
-    poolContract: {},
-    creditcoinProvider: {},
-    sourceChainKey: RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey,
-    sourceChainId: RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId,
+  let fundedRule = uniswapRuleFixture();
+  const poolContract = uniswapRetryCreditPoolFixture({ getRule: () => fundedRule });
+  const worker = makeUniswapWorker({
+    uniswapRetryCreditPoolContract: poolContract,
     proofBuilder: {
       async getBatchProof() {
         calls += 1;
@@ -360,18 +355,154 @@ test("binds the batch builder cache to the full funded rule", async () => {
   await worker.getUniswapRetryCreditBatchProof({
     failedTransactionHash: FAILED_HASH,
     successfulTransactionHash: SUCCESS_HASH,
-    rule: uniswapRuleFixture(),
+    serviceCreditNumber: 1,
   });
+  fundedRule = uniswapRuleFixture({ actionId: `0x${"88".repeat(32)}` });
   await assert.rejects(
     worker.getUniswapRetryCreditBatchProof({
       failedTransactionHash: FAILED_HASH,
       successfulTransactionHash: SUCCESS_HASH,
-      rule: uniswapRuleFixture({ actionId: `0x${"88".repeat(32)}` }),
+      serviceCreditNumber: 1,
     }),
     (error) => error instanceof WorkerError && error.code === "BATCH_PROOF_INVALID",
   );
-  assert.equal(calls, 2);
+  assert.equal(calls, 1);
 });
+
+test("prepares direct-Uniswap release calldata only after the funded pool simulation passes", async () => {
+  const poolContract = uniswapRetryCreditPoolFixture();
+  const worker = makeUniswapWorker({
+    uniswapRetryCreditPoolContract: poolContract,
+    proofBuilder: {
+      async getBatchProof() { return { success: true, data: uniswapBatchFixture() }; },
+    },
+  });
+  const result = await worker.prepareUniswapRetryCreditRelease({
+    serviceCreditNumber: 1,
+    failedTransactionHash: FAILED_HASH,
+    successfulTransactionHash: SUCCESS_HASH,
+    relayer: RELAYER,
+  });
+  assert.equal(poolContract.simulationCalls, 1);
+  assert.equal(result.poolAddress, UNISWAP_RETRY_CREDIT_POOL);
+  assert.equal(result.transaction.from, RELAYER);
+  assert.equal(result.transaction.to, UNISWAP_RETRY_CREDIT_POOL);
+  assert.match(result.transaction.data, /^0x/);
+  assert.equal(result.simulationPassed, true);
+});
+
+test("rejects unauthenticated direct-Uniswap pool state before requesting a proof", async (context) => {
+  const cases = [
+    { name: "pool target", pool: { target: POOL_ADDRESS } },
+    { name: "source key", pool: { sourceChainKey: async () => 3n } },
+    { name: "native chain info", pool: { chainInfo: async () => POOL_ADDRESS } },
+    { name: "verifier target", verifier: { target: POOL_ADDRESS } },
+    { name: "predicate", verifier: { predicate: async () => POOL_ADDRESS } },
+    { name: "native verifier", verifier: { verifier: async () => POOL_ADDRESS } },
+  ];
+  for (const scenario of cases) {
+    await context.test(scenario.name, async () => {
+      let builderCalls = 0;
+      const worker = makeUniswapWorker({
+        uniswapRetryCreditPoolContract: {
+          ...uniswapRetryCreditPoolFixture(),
+          ...scenario.pool,
+        },
+        uniswapRetryCreditVerifierContract: {
+          ...uniswapRetryCreditVerifierFixture(),
+          ...scenario.verifier,
+        },
+        proofBuilder: {
+          async getBatchProof() { builderCalls += 1; return { success: true, data: uniswapBatchFixture() }; },
+        },
+      });
+      await assert.rejects(
+        worker.getUniswapRetryCreditBatchProof({
+          failedTransactionHash: FAILED_HASH,
+          successfulTransactionHash: SUCCESS_HASH,
+          serviceCreditNumber: 1,
+        }),
+        (error) => error instanceof WorkerError && error.code === "UNISWAP_RETRY_CREDIT_STATE_UNAVAILABLE",
+      );
+      assert.equal(builderCalls, 0);
+    });
+  }
+});
+
+test("rejects a zero direct-Uniswap relayer without building or simulating", async () => {
+  const poolContract = uniswapRetryCreditPoolFixture();
+  const worker = makeUniswapWorker({ uniswapRetryCreditPoolContract: poolContract });
+  await assert.rejects(
+    worker.prepareUniswapRetryCreditRelease({
+      serviceCreditNumber: 1,
+      failedTransactionHash: FAILED_HASH,
+      successfulTransactionHash: SUCCESS_HASH,
+      relayer: "0x0000000000000000000000000000000000000000",
+    }),
+    (error) => error instanceof WorkerError && error.code === "INVALID_ADDRESS",
+  );
+  assert.equal(poolContract.simulationCalls, 0);
+});
+
+function makeUniswapWorker(overrides = {}) {
+  return new RuleDropWorker({
+    poolAddress: POOL_ADDRESS,
+    poolAbi: ["function campaignCount() view returns (uint256)"],
+    poolContract: {},
+    creditcoinProvider: {},
+    sourceChainKey: RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey,
+    sourceChainId: RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId,
+    proofBuilder: { async getBatchProof() { throw new Error("unexpected proof request"); } },
+    uniswapRetryCreditPoolAddress: UNISWAP_RETRY_CREDIT_POOL,
+    uniswapRetryCreditPoolContract: uniswapRetryCreditPoolFixture(),
+    uniswapRetryCreditVerifierContract: uniswapRetryCreditVerifierFixture(),
+    ...overrides,
+  });
+}
+
+function uniswapRetryCreditPoolFixture({
+  getRule = () => uniswapRuleFixture(),
+  simulationError,
+} = {}) {
+  const fixture = {
+    target: UNISWAP_RETRY_CREDIT_POOL,
+    simulationCalls: 0,
+    async getRule() { return getRule(); },
+    async getServiceCredit() {
+      return {
+        sponsor: "0x9999999999999999999999999999999999999999",
+        creditAmount: 100_000_000_000_000_000n,
+        refundAfter: 4_102_444_800n,
+        creationBlock: 100n,
+        termsHash: `0x${"99".repeat(32)}`,
+        released: false,
+        refunded: false,
+      };
+    },
+    async sourceChainKey() { return BigInt(RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey); },
+    async sourceChainId() { return BigInt(RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId); },
+    async retryVerifier() { return UNISWAP_RETRY_CREDIT_VERIFIER; },
+    async predicate() { return UNISWAP_RETRY_CREDIT_PREDICATE; },
+    async chainInfo() { return "0x0000000000000000000000000000000000000fD3"; },
+    releaseCredit: {
+      staticCall: async () => {
+        fixture.simulationCalls += 1;
+        if (simulationError) throw simulationError;
+      },
+    },
+  };
+  return fixture;
+}
+
+function uniswapRetryCreditVerifierFixture() {
+  return {
+    target: UNISWAP_RETRY_CREDIT_VERIFIER,
+    async sourceChainKey() { return BigInt(RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey); },
+    async sourceChainId() { return BigInt(RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId); },
+    async predicate() { return UNISWAP_RETRY_CREDIT_PREDICATE; },
+    async verifier() { return "0x0000000000000000000000000000000000000FD2"; },
+  };
+}
 
 function uniswapRuleFixture(overrides = {}) {
   return {

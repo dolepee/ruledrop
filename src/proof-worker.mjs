@@ -52,6 +52,16 @@ const RETRY_CREDIT_POOL_ABI = [
   "function chainInfo() view returns (address)",
   "function releaseCredit(uint256 serviceCreditNumber,(uint64[] sourceBlocks,bytes[] encodedTransactions,(bytes32 root,(bytes32 hash,bool isLeft)[] siblings)[] merkleProofs,bytes32 lowerEndpointDigest,bytes32[] continuityRoots) proof)",
 ];
+const UNISWAP_RETRY_CREDIT_POOL_ABI = [
+  "function getRule(uint256 serviceCreditNumber) view returns ((address routeSigner,address trader,address router,address weth,address usdc,address pool,bytes32 policyId,bytes32 actionId,uint256 amountIn,uint256 minimumSuccessfulOut,uint64 startBlock,uint64 endBlock,uint32 maxBlockGap,uint64 minimumAttemptGasLimit,uint64 maxFailureGasUsed))",
+  "function getServiceCredit(uint256 serviceCreditNumber) view returns ((address sponsor,uint256 creditAmount,uint64 refundAfter,uint256 creationBlock,bytes32 termsHash,bool released,bool refunded))",
+  "function sourceChainKey() view returns (uint64)",
+  "function sourceChainId() view returns (uint64)",
+  "function retryVerifier() view returns (address)",
+  "function predicate() view returns (address)",
+  "function chainInfo() view returns (address)",
+  "function releaseCredit(uint256 serviceCreditNumber,(uint64[] sourceBlocks,bytes[] encodedTransactions,(bytes32 root,(bytes32 hash,bool isLeft)[] siblings)[] merkleProofs,bytes32 lowerEndpointDigest,bytes32[] continuityRoots) proof)",
+];
 const RETRY_CREDIT_VERIFIER_ABI = [
   "function sourceChainKey() view returns (uint64)",
   "function sourceChainId() view returns (uint64)",
@@ -291,6 +301,9 @@ export class RuleDropWorker {
     retryCreditPoolAddress,
     retryCreditPoolContract,
     retryCreditVerifierContract,
+    uniswapRetryCreditPoolAddress,
+    uniswapRetryCreditPoolContract,
+    uniswapRetryCreditVerifierContract,
   }) {
     this.poolAddress = validateAddress(poolAddress, "pool address");
     this.poolAbi = poolAbi;
@@ -308,6 +321,15 @@ export class RuleDropWorker {
         : null);
     this.retryCreditPoolInterface = new Interface(RETRY_CREDIT_POOL_ABI);
     this.retryCreditVerifierContract = retryCreditVerifierContract ?? null;
+    this.uniswapRetryCreditPoolAddress = uniswapRetryCreditPoolAddress
+      ? validateAddress(uniswapRetryCreditPoolAddress, "direct-Uniswap RetryCredit pool address")
+      : null;
+    this.uniswapRetryCreditPool = uniswapRetryCreditPoolContract
+      ?? (this.uniswapRetryCreditPoolAddress
+        ? new Contract(this.uniswapRetryCreditPoolAddress, UNISWAP_RETRY_CREDIT_POOL_ABI, this.creditcoinProvider)
+        : null);
+    this.uniswapRetryCreditPoolInterface = new Interface(UNISWAP_RETRY_CREDIT_POOL_ABI);
+    this.uniswapRetryCreditVerifierContract = uniswapRetryCreditVerifierContract ?? null;
     this.proofBuilder = proofBuilder
       ?? new proofProvider.service.ProofBuilder(this.sourceChainKey, proofBuilderUrl, 120_000);
     this.ethereumProviders = ethereumProviders;
@@ -471,10 +493,11 @@ export class RuleDropWorker {
   async getUniswapRetryCreditBatchProof({
     failedTransactionHash,
     successfulTransactionHash,
-    rule,
+    serviceCreditNumber,
   }) {
     const hashes = validateRetryBatchHashes(failedTransactionHash, successfulTransactionHash);
-    const expectedRule = normalizeUniswapRetryCreditRule(rule);
+    const state = await this.getUniswapRetryCreditState(serviceCreditNumber);
+    const expectedRule = state.rule;
     if (
       this.sourceChainKey !== RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey
       || this.sourceChainId !== RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId
@@ -486,13 +509,17 @@ export class RuleDropWorker {
     }
     const cacheKey = [
       "retry-credit-uniswap-batch",
+      this.uniswapRetryCreditPoolAddress,
+      state.serviceCreditNumber,
       this.sourceChainKey,
       this.sourceChainId,
-      uniswapRetryRuleFingerprint(expectedRule),
       ...hashes,
     ].join(":");
     const cached = this.cache.get(cacheKey);
-    if (cached) return cached;
+    if (cached) {
+      validateUniswapRetryCreditRule(cached, expectedRule);
+      return cached;
+    }
 
     let lastError;
     for (let attempt = 1; attempt <= this.proofAttempts; attempt += 1) {
@@ -521,6 +548,138 @@ export class RuleDropWorker {
       503,
       lastError,
     );
+  }
+
+  async prepareUniswapRetryCreditRelease({
+    serviceCreditNumber,
+    failedTransactionHash,
+    successfulTransactionHash,
+    relayer,
+  }) {
+    const id = parseServiceCreditNumber(serviceCreditNumber);
+    const sender = validateAddress(relayer, "direct-Uniswap RetryCredit relayer address");
+    if (/^0x0{40}$/i.test(sender)) {
+      throw new WorkerError("INVALID_ADDRESS", "direct-Uniswap RetryCredit relayer address must be nonzero");
+    }
+    const batchProof = await this.getUniswapRetryCreditBatchProof({
+      serviceCreditNumber: id,
+      failedTransactionHash,
+      successfulTransactionHash,
+    });
+    const contractProof = toContractBatchProof(batchProof);
+    try {
+      await this.uniswapRetryCreditPool.releaseCredit.staticCall(id, contractProof, {
+        from: sender,
+        gasLimit: 8_000_000n,
+      });
+    } catch (error) {
+      throw new WorkerError(
+        "UNISWAP_RETRY_CREDIT_SIMULATION_REJECTED",
+        explainSimulationError(error),
+        422,
+        error,
+      );
+    }
+    return {
+      serviceCreditNumber: id,
+      poolAddress: this.uniswapRetryCreditPoolAddress,
+      proof: batchProof.summary,
+      transaction: {
+        from: sender,
+        to: this.uniswapRetryCreditPoolAddress,
+        data: this.uniswapRetryCreditPoolInterface.encodeFunctionData("releaseCredit", [id, contractProof]),
+        gas: "0x7a1200",
+        value: "0x0",
+      },
+      simulationPassed: true,
+    };
+  }
+
+  async getUniswapRetryCreditState(serviceCreditNumber) {
+    const id = parseServiceCreditNumber(serviceCreditNumber);
+    if (!this.uniswapRetryCreditPool || !this.uniswapRetryCreditPoolAddress) {
+      throw new WorkerError(
+        "UNISWAP_RETRY_CREDIT_NOT_CONFIGURED",
+        "A funded direct-Uniswap RetryCredit pool is not configured",
+        503,
+      );
+    }
+    try {
+      if (
+        this.uniswapRetryCreditPool.target
+        && getAddress(this.uniswapRetryCreditPool.target) !== this.uniswapRetryCreditPoolAddress
+      ) {
+        throw new Error("configured direct-Uniswap RetryCredit pool does not match its transaction target");
+      }
+      const [
+        ruleValue,
+        credit,
+        poolChainKeyValue,
+        poolChainIdValue,
+        verifierAddressValue,
+        poolPredicateValue,
+        chainInfoValue,
+      ] = await Promise.all([
+        this.uniswapRetryCreditPool.getRule(id),
+        this.uniswapRetryCreditPool.getServiceCredit(id),
+        this.uniswapRetryCreditPool.sourceChainKey(),
+        this.uniswapRetryCreditPool.sourceChainId(),
+        this.uniswapRetryCreditPool.retryVerifier(),
+        this.uniswapRetryCreditPool.predicate(),
+        this.uniswapRetryCreditPool.chainInfo(),
+      ]);
+      const poolChainKey = validateSourceChainKey(poolChainKeyValue);
+      const poolChainId = validateSourceChainId(poolChainIdValue);
+      if (
+        poolChainKey !== RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey
+        || poolChainId !== RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId
+        || poolChainKey !== this.sourceChainKey
+        || poolChainId !== this.sourceChainId
+      ) {
+        throw new Error("direct-Uniswap RetryCredit pool source-chain immutables do not match the worker");
+      }
+      const verifierAddress = getAddress(verifierAddressValue);
+      const poolPredicate = getAddress(poolPredicateValue);
+      const chainInfo = getAddress(chainInfoValue);
+      if (/^0x0{40}$/i.test(verifierAddress) || /^0x0{40}$/i.test(poolPredicate)) {
+        throw new Error("direct-Uniswap RetryCredit pool returned a zero verifier or predicate");
+      }
+      if (chainInfo !== getAddress(RETRY_CREDIT_NATIVE_CHAIN_INFO)) {
+        throw new Error("direct-Uniswap RetryCredit pool is not bound to the native ChainInfo precompile");
+      }
+      const verifier = this.uniswapRetryCreditVerifierContract
+        ?? new Contract(verifierAddress, RETRY_CREDIT_VERIFIER_ABI, this.creditcoinProvider);
+      if (verifier.target && getAddress(verifier.target) !== verifierAddress) {
+        throw new Error("configured direct-Uniswap RetryCredit verifier does not match the pool");
+      }
+      const [verifierChainKeyValue, verifierChainIdValue, verifierPredicateValue, nativeVerifierValue] = await Promise.all([
+        verifier.sourceChainKey(),
+        verifier.sourceChainId(),
+        verifier.predicate(),
+        verifier.verifier(),
+      ]);
+      if (
+        validateSourceChainKey(verifierChainKeyValue) !== poolChainKey
+        || validateSourceChainId(verifierChainIdValue) !== poolChainId
+        || getAddress(verifierPredicateValue) !== poolPredicate
+        || getAddress(nativeVerifierValue) !== getAddress(RETRY_CREDIT_NATIVE_VERIFIER)
+      ) {
+        throw new Error("direct-Uniswap RetryCredit verifier immutables do not match the pool");
+      }
+      if (credit.released || credit.refunded || /^0x0{40}$/i.test(getAddress(credit.sponsor))) {
+        throw new Error("direct-Uniswap RetryCredit service credit is missing or already resolved");
+      }
+      const rule = normalizeUniswapRetryCreditRule(ruleValue);
+      return { serviceCreditNumber: id, rule, credit, verifierAddress, poolPredicate };
+    } catch (error) {
+      if (error instanceof WorkerError) throw error;
+      throw new WorkerError(
+        "UNISWAP_RETRY_CREDIT_STATE_UNAVAILABLE",
+        "The funded direct-Uniswap RetryCredit rule could not be authenticated",
+        503,
+        error,
+      );
+    }
   }
 
   async prepareRetryCreditRelease({
@@ -1119,30 +1278,18 @@ function normalizeUniswapRetryCreditRule(rule) {
   }
 }
 
-function uniswapRetryRuleFingerprint(rule) {
-  return keccak256(abiCoder.encode(
-    [
-      "address", "address", "address", "address", "address", "address", "bytes32", "bytes32",
-      "uint256", "uint256", "uint64", "uint64", "uint32", "uint64", "uint64",
-    ],
-    [
-      rule.routeSigner,
-      rule.trader,
-      rule.router,
-      rule.weth,
-      rule.usdc,
-      rule.pool,
-      rule.policyId,
-      rule.actionId,
-      rule.amountIn,
-      rule.minimumSuccessfulOut,
-      rule.startBlock,
-      rule.endBlock,
-      rule.maxBlockGap,
-      rule.minimumAttemptGasLimit,
-      rule.maxFailureGasUsed,
-    ],
-  ));
+function validateUniswapRetryCreditRule(batchProof, rule) {
+  try {
+    validateUniswapRetryCreditRelationship(
+      batchProof.entries[0],
+      batchProof.entries[1],
+      normalizeUniswapRetryCreditRule(rule),
+      RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId,
+    );
+  } catch (error) {
+    if (error instanceof WorkerError) throw error;
+    throw new WorkerError("BATCH_PROOF_INVALID", error.message, 502, error);
+  }
 }
 
 function decodeUniswapRetryCreditRouteEnvelope(envelope, expectedSourceChainId) {
