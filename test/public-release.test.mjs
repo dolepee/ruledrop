@@ -18,6 +18,8 @@ test("public brand, metadata, and primary action describe one RetryCredit releas
   assert.match(app, /Finish the swap/);
   assert.match(app, /PUBLIC PRIMARY ACTION/);
   assert.match(app, /no mainnet asset or approval/i);
+  assert.match(app, /!session && config\?\.enabled !== true/);
+  assert.match(app, /Checking public allocation/);
   assert.match(app, /Attestcoin proves receipt state and settlement, not the human-readable revert reason/);
 });
 
