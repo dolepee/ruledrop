@@ -18,9 +18,9 @@ services:
       - key: RETRYCREDIT_DEMO_PRIVATE_KEY
         sync: false
       - key: RETRYCREDIT_POOL_ADDRESS
-        value: 0x412980AF2Bc24A57B5eeAEe1ad8cd87f46A26553
+        value: 0x81b5d955F4EbfaE02FF6346cf368A2c4347248A1
       - key: RETRYCREDIT_VERIFIER_ADDRESS
-        value: 0x2D722e01CDC5EE409eb62C048D239E6E2e033A95
+        value: 0x97Fa88CfCaeE1a5D4Ae749b9b5698F2147b986fC
       - key: SEPOLIA_RPC_URL
         value: https://ethereum-sepolia-rpc.publicnode.com
       - key: RULEDROP_POOL_ADDRESS
