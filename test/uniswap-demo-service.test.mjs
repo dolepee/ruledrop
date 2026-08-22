@@ -55,7 +55,7 @@ test("challenge binds origin, wallet, time window, and bounded testnet scope", a
   );
 });
 
-test("refuses to report readiness for a non-V2 pool deployment", async () => {
+test("refuses to report readiness for a non-current pool deployment", async () => {
   const fixture = serviceFixture({ pilotVersion: `0x${"00".repeat(32)}` });
   await assert.rejects(
     makeService(fixture).readiness(),
@@ -391,7 +391,7 @@ function serviceFixture({
   existingCredits = [],
   released = false,
   releaseHash = `0x${"66".repeat(32)}`,
-  pilotVersion = id("RETRYCREDIT_PUBLIC_V2"),
+  pilotVersion = id("RETRYCREDIT_PUBLIC_V3"),
 } = {}) {
   let createdTerms;
   let isReleased = released;
@@ -469,7 +469,11 @@ function serviceFixture({
         async wait() {
           return receiptWithEvent(
             "SourceTransactionsCommitted",
-            [BigInt(_id), Transaction.from(failed).hash, Transaction.from(successful).hash],
+            [
+              BigInt(_id),
+              Transaction.from(failed).hash,
+              Transaction.from(successful).hash,
+            ],
             `0x${"56".repeat(32)}`,
             102,
           );

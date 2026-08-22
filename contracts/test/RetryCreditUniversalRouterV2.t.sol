@@ -8,6 +8,7 @@ import {
 } from "../src/AttestcoinRetryCreditUniversalRouterVerifierV2.sol";
 import {RetryCreditUniversalRouterPoolV2} from "../src/RetryCreditUniversalRouterPoolV2.sol";
 import {RetryCreditUniversalRouterPredicateV2} from "../src/RetryCreditUniversalRouterPredicateV2.sol";
+import {Type2TransactionHash} from "../src/Type2TransactionHash.sol";
 import {INativeQueryVerifier} from "../src/interfaces/INativeQueryVerifier.sol";
 import {MockChainInfo} from "./mocks/MockChainInfo.sol";
 import {MockNativeQueryVerifier} from "./mocks/MockNativeQueryVerifier.sol";
@@ -129,10 +130,10 @@ contract RetryCreditUniversalRouterV2Test is Test {
         AttestcoinRetryCreditUniversalRouterVerifierV2.BatchProof memory proof = _validProofForRule(activeRule);
         nativeVerifier.setTransactionIndexForRoot(proof.merkleProofs[0].root, 7);
         nativeVerifier.setTransactionIndexForRoot(proof.merkleProofs[1].root, 11);
+        bytes memory failedRaw = Type2TransactionHash.encode(proof.encodedTransactions[0]);
+        bytes memory successfulRaw = Type2TransactionHash.encode(proof.encodedTransactions[1]);
         vm.prank(sponsor);
-        servicePool.commitSourceTransactions(
-            serviceCreditNumber, proof.encodedTransactions[0], proof.encodedTransactions[1]
-        );
+        servicePool.commitSourceTransactions(serviceCreditNumber, failedRaw, successfulRaw);
 
         uint256 beneficiaryBefore = beneficiary.balance;
         vm.prank(prover);
@@ -163,9 +164,12 @@ contract RetryCreditUniversalRouterV2Test is Test {
         (uint256 serviceCreditNumber,) = _createAndActivateServiceCredit();
         RetryCreditUniversalRouterPredicateV2.Rule memory activeRule = servicePool.getRule(serviceCreditNumber);
         AttestcoinRetryCreditUniversalRouterVerifierV2.BatchProof memory proof = _validProofForRule(activeRule);
+        bytes memory failedRaw = Type2TransactionHash.encode(proof.encodedTransactions[0]);
+        bytes memory successfulRaw = Type2TransactionHash.encode(proof.encodedTransactions[1]);
+        failedRaw[failedRaw.length - 1] = bytes1(uint8(failedRaw[failedRaw.length - 1]) ^ 1);
 
         vm.prank(sponsor);
-        servicePool.commitSourceTransactions(serviceCreditNumber, hex"02aabb", proof.encodedTransactions[1]);
+        servicePool.commitSourceTransactions(serviceCreditNumber, failedRaw, successfulRaw);
 
         vm.expectRevert(RetryCreditUniversalRouterPoolV2.InvalidSourceTransactions.selector);
         vm.prank(prover);
@@ -315,8 +319,16 @@ contract RetryCreditUniversalRouterV2Test is Test {
         );
     }
 
+    function testType2HashReconstructsAnIndependentEthersSignedTransaction() external pure {
+        bytes memory expectedRaw =
+            hex"02f87783aa36a707843b9aca008477359400830493e0947dfd4f31be6814d2906bde155c3e1b146eac14688609184e72a00083123456c080a083e1ba9757498197d116fcbf78fa94a0bf9609136f76c9b89d7d6d9a4cc13632a0396ec8176f35ddbd223a51ed34d391a7d8920738975ad7452ace5ad3376fe6f3";
+        bytes memory reconstructed = Type2TransactionHash.encode(_knownEthersType2Envelope());
+        assertEq(reconstructed, expectedRaw);
+        assertEq(keccak256(reconstructed), 0xda1618a0875c793bdba65be9f02c1912423b483599e69c740532cfebaf265dd8);
+    }
+
     function testTermsRequireExactOfficialSepoliaStackAndDistinctRoles() external {
-        assertEq(servicePool.PUBLIC_PILOT_VERSION(), keccak256("RETRYCREDIT_PUBLIC_V2"));
+        assertEq(servicePool.PUBLIC_PILOT_VERSION(), keccak256("RETRYCREDIT_PUBLIC_V3"));
         RetryCreditUniversalRouterPredicateV2.Rule memory terms = _rule();
         terms.policyId = bytes32(0);
         predicate.validateTerms(terms);
@@ -1079,5 +1091,33 @@ contract RetryCreditUniversalRouterV2Test is Test {
             bytes32(uint256(1)),
             bytes32(uint256(2))
         );
+    }
+
+    function _knownEthersType2Envelope() private pure returns (bytes memory) {
+        bytes memory common = abi.encode(
+            uint64(7),
+            uint64(300_000),
+            0x19E7E376E7C213B7E7e7e46cc70A5dD086DAff2A,
+            false,
+            ROUTER,
+            uint256(10_000_000_000_000),
+            hex"123456"
+        );
+        EvmV1Decoder.AccessListEntry[] memory accessList = new EvmV1Decoder.AccessListEntry[](0);
+        bytes memory typeSpecific = abi.encode(
+            uint64(SOURCE_CHAIN_ID),
+            uint128(1_000_000_000),
+            uint128(2_000_000_000),
+            accessList,
+            uint8(0),
+            0x83e1ba9757498197d116fcbf78fa94a0bf9609136f76c9b89d7d6d9a4cc13632,
+            0x396ec8176f35ddbd223a51ed34d391a7d8920738975ad7452ace5ad3376fe6f3
+        );
+        EvmV1Decoder.LogEntryTuple[] memory logs = new EvmV1Decoder.LogEntryTuple[](0);
+        bytes[] memory chunks = new bytes[](3);
+        chunks[0] = common;
+        chunks[1] = typeSpecific;
+        chunks[2] = abi.encode(uint8(0), uint64(21_000), logs, new bytes(256));
+        return abi.encode(uint8(2), chunks);
     }
 }

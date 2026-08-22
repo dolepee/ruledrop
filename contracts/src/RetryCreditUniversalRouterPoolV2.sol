@@ -4,11 +4,12 @@ pragma solidity ^0.8.23;
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {AttestcoinRetryCreditUniversalRouterVerifierV2} from "./AttestcoinRetryCreditUniversalRouterVerifierV2.sol";
 import {RetryCreditUniversalRouterPredicateV2} from "./RetryCreditUniversalRouterPredicateV2.sol";
+import {Type2TransactionHash} from "./Type2TransactionHash.sol";
 import {IChainInfo} from "./interfaces/IChainInfo.sol";
 
 /// @notice Holds one pre-funded service credit until Attestcoin proves a failed then settled signed Uniswap route.
 contract RetryCreditUniversalRouterPoolV2 is ReentrancyGuard {
-    bytes32 public constant PUBLIC_PILOT_VERSION = keccak256("RETRYCREDIT_PUBLIC_V2");
+    bytes32 public constant PUBLIC_PILOT_VERSION = keccak256("RETRYCREDIT_PUBLIC_V3");
     address public constant CHAIN_INFO = 0x0000000000000000000000000000000000000fD3;
     uint256 public constant ACTIVATION_WINDOW_BLOCKS = 256;
 
@@ -201,8 +202,8 @@ contract RetryCreditUniversalRouterPoolV2 is ReentrancyGuard {
         SourceTransactions storage committed = sourceTransactions[serviceCreditNumber];
         if (
             proof.encodedTransactions.length != 2 || committed.failed.length == 0
-                || keccak256(proof.encodedTransactions[0]) != keccak256(committed.failed)
-                || keccak256(proof.encodedTransactions[1]) != keccak256(committed.successful)
+                || Type2TransactionHash.hash(proof.encodedTransactions[0]) != keccak256(committed.failed)
+                || Type2TransactionHash.hash(proof.encodedTransactions[1]) != keccak256(committed.successful)
         ) revert InvalidSourceTransactions();
 
         (address beneficiary, bytes32 failureQueryId, bytes32 successQueryId, bytes32 pairId) =

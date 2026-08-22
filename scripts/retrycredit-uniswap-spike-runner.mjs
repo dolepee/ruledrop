@@ -58,7 +58,7 @@ const artifacts = {
   verifier: "out/AttestcoinRetryCreditUniversalRouterVerifier.sol/AttestcoinRetryCreditUniversalRouterVerifier.json",
   pool: "out/RetryCreditUniversalRouterPool.sol/RetryCreditUniversalRouterPool.json",
 };
-const publicV2Artifacts = {
+const publicV3Artifacts = {
   decoder: "out/EvmV1Decoder.sol/EvmV1Decoder.json",
   predicate: "out/RetryCreditUniversalRouterPredicateV2.sol/RetryCreditUniversalRouterPredicateV2.json",
   verifier: "out/AttestcoinRetryCreditUniversalRouterVerifierV2.sol/AttestcoinRetryCreditUniversalRouterVerifierV2.json",
@@ -108,8 +108,8 @@ const routeTypes = {
 
 async function main() {
   const [mode, inputStatePath, label = "run"] = process.argv.slice(2);
-  if (!["deploy", "deploy-public-v2", "prepare", "source", "release", "status"].includes(mode)) {
-    throw new Error("usage: node scripts/retrycredit-uniswap-spike-runner.mjs <deploy|deploy-public-v2|prepare|source|release|status> [input-state.json] [label]");
+  if (!["deploy", "deploy-public-v3", "prepare", "source", "release", "status"].includes(mode)) {
+    throw new Error("usage: node scripts/retrycredit-uniswap-spike-runner.mjs <deploy|deploy-public-v3|prepare|source|release|status> [input-state.json] [label]");
   }
   const ccProvider = new JsonRpcProvider(CC_RPC, CREDITCOIN_CHAIN_ID, { staticNetwork: true });
   const sepoliaProvider = new JsonRpcProvider(SEPOLIA_RPC, RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId, { staticNetwork: true });
@@ -132,8 +132,8 @@ async function main() {
   const routeSigner = new Wallet(deriveKey(privateKey, "RETRYCREDIT_UNISWAP_ROUTE_SIGNER_V1"));
   const relayer = new Wallet(deriveKey(privateKey, "RETRYCREDIT_UNISWAP_CC3_RELAYER_V1"), ccProvider);
 
-  if (mode === "deploy-public-v2") {
-    const state = await deployPublicV2Infrastructure({ ccProvider, operator, label });
+  if (mode === "deploy-public-v3") {
+    const state = await deployPublicV3Infrastructure({ ccProvider, operator, label });
     await persistState(state);
     print(state);
     return;
@@ -171,19 +171,25 @@ async function main() {
   print(result);
 }
 
-async function deployPublicV2Infrastructure({ ccProvider, operator, label }) {
+async function deployPublicV3Infrastructure({ ccProvider, operator, label }) {
   await requireBalance(ccProvider, operator.address, parseEther("0.5"), "CC3 public-demo sponsor");
   const routeSigner = new Wallet(deriveKey(operator.privateKey, "RETRYCREDIT_PUBLIC_ROUTE_SIGNER_V2"));
   const relayer = new Wallet(deriveKey(operator.privateKey, "RETRYCREDIT_PUBLIC_CC3_RELAYER_V2"), ccProvider);
-  const decoder = await deploy("decoder", publicV2Artifacts.decoder, operator, []);
-  const predicate = await deploy("predicate-v2", publicV2Artifacts.predicate, operator, [], { EvmV1Decoder: decoder.address });
-  const verifier = await deploy("verifier-v2", publicV2Artifacts.verifier, operator, [
+  const decoder = await deploy("decoder", publicV3Artifacts.decoder, operator, []);
+  const predicate = await deploy("predicate-v3", publicV3Artifacts.predicate, operator, [], { EvmV1Decoder: decoder.address });
+  const verifier = await deploy("verifier-v3", publicV3Artifacts.verifier, operator, [
     predicate.address,
     ZeroAddress,
     RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainKey,
     RETRY_CREDIT_UNISWAP_SEPOLIA.sourceChainId,
   ]);
-  const pool = await deploy("pool-v2", publicV2Artifacts.pool, operator, [verifier.address, ZeroAddress]);
+  const pool = await deploy(
+    "pool-v3",
+    publicV3Artifacts.pool,
+    operator,
+    [verifier.address, ZeroAddress],
+    { EvmV1Decoder: decoder.address },
+  );
   const relayerBalance = await ccProvider.getBalance(relayer.address);
   let relayerFundingTransaction = null;
   if (relayerBalance < RELAYER_TARGET_BALANCE) {
@@ -194,7 +200,7 @@ async function deployPublicV2Infrastructure({ ccProvider, operator, label }) {
     relayerFundingTransaction = receipt.hash;
   }
   return {
-    schemaVersion: "retrycredit.public-v2.v1",
+    schemaVersion: "retrycredit.public-v3.v1",
     stage: "deployed",
     label,
     operator: operator.address,
