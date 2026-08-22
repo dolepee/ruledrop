@@ -38,16 +38,19 @@ test("public brand, metadata, and primary action describe one RetryCredit releas
 
 test("public evidence links bind the exact fresh lifecycle", () => {
   const hashes = [
-    "0x5ef2e6e47da2892774967c69aa48814d4db08141d76e53418ad7886d67683722",
-    "0xb6f516f52d0286bf274ae63a000df67583250c13d3645e6ce5e80ae40716766b",
-    "0xbc44875c384fa4a9a67a7cdfd390d2322db84570c60e54fe65fed1e0b7a40e84",
+    "0x9cb81e134e33f32b702786589510948d097ae98d0ef3ffec4c631a1288a0ee07",
+    "0x81e96116c5b3e050a1b4ac6d1cea611817e7d028636003e7aa6d12f5c412f9b0",
+    "0xb787581b58bab15bc4e8e78389c6d0d4bb362896d265bdbe2263df7d7eb77cdf",
   ];
   for (const hash of hashes) {
     assert.match(app, new RegExp(hash));
     assert.match(readme, new RegExp(hash));
   }
-  assert.match(readme, /founder-funded service credits/);
-  assert.match(readme, /not customer demand/);
+  assert.match(readme, /founder-funded service credit/);
+  assert.match(readme, /not independent adoption or customer demand/);
+  assert.match(app, /From stale route to credit in 552 seconds/);
+  assert.match(app, /0\.218500 test USDC/);
+  assert.match(app, /Creditcoin · 0\.01 tCTC/);
   assert.match(readme, /reviewed V3 pilot/);
   assert.match(readme, /V3 pilot is enabled/);
 });
