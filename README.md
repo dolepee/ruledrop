@@ -27,20 +27,15 @@ Remove Attestcoin and the Creditcoin pool cannot authorize the release. The proo
 
 ## Public evidence
 
-A fresh direct-Uniswap lifecycle completed on August 22, 2026:
+A fresh lifecycle completed through the deployed public HTTPS service on August 22, 2026:
 
-- Included status-0 route: [`0x5ef2…3722`](https://sepolia.etherscan.io/tx/0x5ef2e6e47da2892774967c69aa48814d4db08141d76e53418ad7886d67683722)
-- Next-block settled retry: [`0xb6f5…766b`](https://sepolia.etherscan.io/tx/0xb6f516f52d0286bf274ae63a000df67583250c13d3645e6ce5e80ae40716766b)
-- Creditcoin release: [`0xbc44…0e84`](https://creditcoin-testnet.blockscout.com/tx/0xbc44875c384fa4a9a67a7cdfd390d2322db84570c60e54fe65fed1e0b7a40e84)
-- Source-to-credit time: 477 seconds.
+- Included status-0 route: [`0x9cb8…ee07`](https://sepolia.etherscan.io/tx/0x9cb81e134e33f32b702786589510948d097ae98d0ef3ffec4c631a1288a0ee07)
+- Next-block settled retry: [`0x81e9…f9b0`](https://sepolia.etherscan.io/tx/0x81e96116c5b3e050a1b4ac6d1cea611817e7d028636003e7aa6d12f5c412f9b0)
+- Creditcoin release: [`0xb787…7cdf`](https://creditcoin-testnet.blockscout.com/tx/0xb787581b58bab15bc4e8e78389c6d0d4bb362896d265bdbe2263df7d7eb77cdf)
+- Source-to-credit time: 552 seconds.
+- Public replay returned the same release and produced no second `CreditReleased` event.
 
-A separate cold visitor run used only the public HTTP surface and a disposable wallet:
-
-- Included status-0 route: [`0x06b4…90a2`](https://sepolia.etherscan.io/tx/0x06b4c1df16a075587fcd1192090afa05200e55e8c3e8c0f3728b446d1dbc90a2)
-- Next-block settled retry: [`0xffbd…0c7b`](https://sepolia.etherscan.io/tx/0xffbd4b44f5fc22949cf0ac8829da7dc4b0cf7bb8a3d9ae483811ff903d710c7b)
-- Creditcoin release: [`0x00f0…f56b0`](https://creditcoin-testnet.blockscout.com/tx/0x00f033e14dc4c6583f17dc0571f463b89ffa7f53519d467c2f54bc01249f56b0)
-
-Both executions used test assets and founder-funded service credits. They prove engineering and public-chain causality, not customer demand.
+The execution used test assets and a founder-funded service credit. It proves public causability and public-chain execution, not independent adoption or customer demand.
 
 ## Contracts
 
