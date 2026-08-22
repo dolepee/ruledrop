@@ -14,4 +14,4 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Check RetryCredit health
-        run: curl --fail --silent --show-error --retry 3 --max-time 25 https://ruledrop.dolepee.com/health
+        run: curl --fail --silent --show-error --retry 3 --max-time 25 https://retrycredit.dolepee.com/health
